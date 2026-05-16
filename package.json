@@ -12,6 +12,7 @@
   },
   "dependencies": {
     "@clerk/react": "^6.6.4",
+    "@google/genai": "^2.3.0",
     "convex": "^1.39.1",
     "react": "^19.2.6",
     "react-dom": "^19.2.6"

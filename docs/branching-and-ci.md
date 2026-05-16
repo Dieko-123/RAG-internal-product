@@ -64,8 +64,10 @@ Cloudflare environment variables:
 Convex environment variables stay in Convex:
 
 - `CLERK_JWT_ISSUER_DOMAIN`
-- `GEMINI_API_KEY` later, Phase 1 only
-- `GEMINI_DEFAULT_MODEL` later
+- `GEMINI_API_KEY`
+- `GEMINI_DEFAULT_MODEL=gemini-2.5-flash-lite`
+- `APP_ADMIN_EMAILS`
+- `APP_ADMIN_TOKEN_IDENTIFIERS`
 - `APP_ALLOWED_EMAIL_DOMAINS` later if needed
 - `MONTHLY_BUDGET_USD` later if needed
 
@@ -89,4 +91,4 @@ Protect `dev`:
 
 ## Phase 1 guardrail
 
-Phase 1 may add `@google/genai`, but Gemini API usage must stay in Convex/server-side code. Do not expose Gemini secrets or calls from browser code.
+Phase 1 may add `@google/genai`, but Gemini API usage must stay in Convex/server-side code. Do not expose Gemini secrets or calls from browser code. `APP_ADMIN_EMAILS` and `APP_ADMIN_TOKEN_IDENTIFIERS` are comma-separated temporary allowlists for the protected dummy-manual ingestion action; full role management can come later. Prefer `APP_ADMIN_TOKEN_IDENTIFIERS` when Clerk does not include email claims in the Convex identity.
