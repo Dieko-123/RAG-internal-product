@@ -1,3 +1,4 @@
+import { execFileSync } from 'node:child_process'
 import { existsSync, readFileSync } from 'node:fs'
 import path from 'node:path'
 
@@ -43,6 +44,32 @@ if (existsSync(path.join(appDir, 'layout.tsx')) || existsSync(path.join(appDir, 
 }
 if (existsSync(path.join(pagesDir, '_app.tsx')) || existsSync(path.join(pagesDir, 'api'))) {
   failures.push('Next.js Pages Router files detected in pages/.')
+}
+
+const trackedFiles = execFileSync(
+  'git',
+  ['ls-files', '--cached', '--others', '--exclude-standard'],
+  {
+  cwd: root,
+  encoding: 'utf8',
+  },
+)
+  .split(/\r?\n/)
+  .filter(Boolean)
+
+for (const file of trackedFiles) {
+  if (!file.startsWith('src/')) continue
+  if (!/\.(ts|tsx|js|jsx)$/.test(file)) continue
+
+  const contents = readFileSync(path.join(root, file), 'utf8')
+
+  if (contents.includes('@google/genai')) {
+    failures.push(`${file} imports @google/genai. Gemini must stay in Convex/server-side code.`)
+  }
+
+  if (contents.includes('GEMINI_API_KEY')) {
+    failures.push(`${file} references GEMINI_API_KEY. Gemini secrets must not enter frontend code.`)
+  }
 }
 
 if (failures.length > 0) {

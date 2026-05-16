@@ -168,6 +168,74 @@
   opacity: 1;
 }
 
+.chat-history {
+  display: grid;
+  gap: 10px;
+  margin-top: 18px;
+  padding-top: 18px;
+  border-top: 1px solid var(--border);
+}
+
+.new-chat-button,
+.history-item {
+  display: flex;
+  align-items: center;
+  width: 100%;
+  min-height: 38px;
+  border: 1px solid transparent;
+  border-radius: 8px;
+  background: transparent;
+  color: var(--text);
+  cursor: pointer;
+  text-align: left;
+}
+
+.new-chat-button {
+  gap: 10px;
+  padding: 8px 12px;
+  background: var(--surface);
+  border-color: var(--border);
+  font-size: 13px;
+  font-weight: 600;
+}
+
+.new-chat-button:hover,
+.history-item:hover {
+  background: var(--hover);
+}
+
+.history-list {
+  display: grid;
+  gap: 2px;
+  max-height: 320px;
+  overflow-y: auto;
+}
+
+.history-item {
+  padding: 8px 10px;
+  color: var(--muted);
+  font-size: 13px;
+}
+
+.history-item span {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.history-item.active {
+  background: var(--accent-subtle);
+  color: var(--accent);
+  font-weight: 600;
+}
+
+.history-empty {
+  display: block;
+  padding: 8px 10px;
+  color: var(--muted);
+  font-size: 12px;
+}
+
 .sidebar-footer {
   margin-top: auto;
   padding-top: 16px;
@@ -186,6 +254,10 @@
   text-overflow: ellipsis;
   white-space: nowrap;
   max-width: 160px;
+}
+
+.sidebar-user {
+  min-width: 0;
 }
 
 .sidebar-footer .user-role {
@@ -264,6 +336,63 @@
   background: var(--surface);
   border: 1px solid var(--border);
   color: var(--text);
+}
+
+.message-user {
+  align-self: flex-end;
+  background: var(--accent);
+  color: oklch(98% 0.005 75);
+}
+
+.message-pending {
+  opacity: 0.65;
+}
+
+.message-warning {
+  background: oklch(98% 0.018 85);
+  border: 1px solid oklch(87% 0.035 85);
+  color: var(--text);
+}
+
+.message p {
+  margin: 0;
+}
+
+.answer-meta {
+  margin-top: 12px;
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.citations {
+  display: grid;
+  gap: 8px;
+  margin-top: 14px;
+}
+
+.citation {
+  border-top: 1px solid var(--border);
+  padding-top: 10px;
+}
+
+.citation span {
+  color: var(--text);
+  font-size: 12px;
+  font-weight: 600;
+}
+
+.citation strong {
+  margin-left: 8px;
+  color: var(--muted);
+  font-size: 12px;
+  font-weight: 500;
+}
+
+.citation p {
+  margin-top: 6px;
+  color: var(--muted);
+  font-size: 12px;
+  line-height: 1.5;
 }
 
 .message-empty {
@@ -408,6 +537,119 @@
   margin-bottom: 24px;
 }
 
+.status-idle {
+  background: oklch(72% 0.012 75);
+}
+
+.inline-error,
+.inline-success {
+  border-radius: 8px;
+  padding: 10px 12px;
+  font-size: 13px;
+  line-height: 1.4;
+}
+
+.inline-error {
+  background: oklch(97% 0.018 25);
+  border: 1px solid oklch(86% 0.05 25);
+  color: oklch(38% 0.09 25);
+}
+
+.inline-success {
+  background: oklch(97% 0.02 145);
+  border: 1px solid oklch(85% 0.04 145);
+  color: oklch(36% 0.07 145);
+}
+
+.document-grid {
+  display: grid;
+  grid-template-columns: minmax(280px, 420px) minmax(280px, 520px);
+  gap: 24px;
+  align-items: start;
+}
+
+.manual-panel,
+.manual-list {
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--surface);
+}
+
+.manual-panel {
+  display: grid;
+  gap: 18px;
+  padding: 24px;
+}
+
+.manual-panel svg {
+  color: var(--accent);
+}
+
+.manual-panel h2 {
+  margin: 0 0 6px;
+  color: var(--text);
+  font-size: 17px;
+  font-weight: 620;
+}
+
+.manual-panel p {
+  margin: 0;
+  color: var(--muted);
+  font-size: 14px;
+  line-height: 1.6;
+}
+
+.manual-list {
+  display: grid;
+  overflow: hidden;
+}
+
+.manual-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 18px;
+  min-height: 64px;
+  padding: 14px 16px;
+  border-bottom: 1px solid var(--border);
+}
+
+.manual-row:last-child {
+  border-bottom: none;
+}
+
+.manual-row strong,
+.manual-row span {
+  display: block;
+}
+
+.manual-row strong {
+  color: var(--text);
+  font-size: 14px;
+  font-weight: 600;
+}
+
+.manual-row span {
+  margin-top: 3px;
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.manual-row mark {
+  border-radius: 999px;
+  background: var(--accent-subtle);
+  color: var(--accent);
+  padding: 4px 9px;
+  font-size: 12px;
+  font-weight: 600;
+}
+
+.muted-row {
+  justify-content: center;
+  color: var(--muted);
+  font-size: 14px;
+}
+
 /* Responsive */
 @media (max-width: 860px) {
   .console {
@@ -435,6 +677,10 @@
 
   .main-panel {
     padding: 24px 20px;
+  }
+
+  .document-grid {
+    grid-template-columns: 1fr;
   }
 }
 
