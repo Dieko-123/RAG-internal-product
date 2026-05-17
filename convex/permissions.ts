@@ -68,18 +68,22 @@ export async function requireAdmin(ctx: AuthCtx): Promise<SafeIdentity> {
 export async function requireAllowedUser(ctx: DbCtx): Promise<SafeIdentity> {
   const identity = await requireUser(ctx)
 
+  const user = await ctx.db
+    .query('users')
+    .withIndex('by_tokenIdentifier', (q) =>
+      q.eq('tokenIdentifier', identity.tokenIdentifier),
+    )
+    .unique()
+
+  if (user?.status === 'suspended') {
+    throw new Error('Not authorized for this internal app.')
+  }
+
   if (isAdminIdentity(identity) || isAllowedIdentity(identity)) {
-    const user = await ctx.db
-      .query('users')
-      .withIndex('by_tokenIdentifier', (q) =>
-        q.eq('tokenIdentifier', identity.tokenIdentifier),
-      )
-      .unique()
+    return identity
+  }
 
-    if (user?.status === 'suspended') {
-      throw new Error('Not authorized for this internal app.')
-    }
-
+  if (user?.status === 'active') {
     return identity
   }
 
@@ -93,7 +97,21 @@ export async function ensureUserAndMembership(
   const identity = await requireUser(ctx)
 
   if (!isAdminIdentity(identity) && !isAllowedIdentity(identity)) {
-    throw new Error('Not authorized for this internal app.')
+    const email = (overrides?.emailOverride ?? identity.email)?.toLowerCase()?.trim()
+    if (email) {
+      const pendingInvite = await ctx.db
+        .query('invites')
+        .withIndex('by_emailNormalized_and_status', (q) =>
+          q.eq('emailNormalized', email).eq('status', 'pending'),
+        )
+        .first()
+
+      if (!pendingInvite || (pendingInvite.expiresAt && pendingInvite.expiresAt < Date.now())) {
+        throw new Error('Not authorized for this internal app.')
+      }
+    } else {
+      throw new Error('Not authorized for this internal app.')
+    }
   }
 
   const organizationId = await getOrCreateDefaultOrganization(ctx)

@@ -809,6 +809,8 @@ function AdminWorkspace({
   const [inviteDepartmentId, setInviteDepartmentId] = useState<DepartmentId | ''>('')
   const [inviteDepartmentRole, setInviteDepartmentRole] = useState<'member' | 'department_admin' | 'viewer'>('member')
   const [isInviting, setIsInviting] = useState(false)
+  const effectiveInviteDepartmentId = inviteDepartmentId
+    || (!isOrgAdmin && uploadInfo?.departments?.length === 1 ? uploadInfo.departments[0]._id : '')
 
   async function handleInviteUser() {
     const email = inviteEmail.trim()
@@ -822,8 +824,8 @@ function AdminWorkspace({
       await inviteUser({
         email,
         role: inviteRole,
-        departmentId: inviteDepartmentId || undefined,
-        departmentRole: inviteDepartmentId ? inviteDepartmentRole : undefined,
+        departmentId: effectiveInviteDepartmentId || undefined,
+        departmentRole: effectiveInviteDepartmentId ? inviteDepartmentRole : undefined,
       })
       setInviteEmail('')
       setMessage(`Invitation sent to ${email}`)
@@ -1121,7 +1123,7 @@ function AdminWorkspace({
           <label className="field-label">
             Department (optional)
             <select
-              value={inviteDepartmentId}
+              value={effectiveInviteDepartmentId}
               onChange={(event) =>
                 setInviteDepartmentId(event.target.value as DepartmentId | '')
               }
@@ -1137,7 +1139,7 @@ function AdminWorkspace({
               )}
             </select>
           </label>
-          {inviteDepartmentId && isOrgAdmin ? (
+          {effectiveInviteDepartmentId && isOrgAdmin ? (
             <label className="field-label">
               Department role
               <select
