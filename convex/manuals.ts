@@ -5,6 +5,7 @@ import type { QueryCtx } from './_generated/server'
 import {
   getDefaultOrganization,
   getOrCreateDefaultOrganization,
+  isAdminIdentity,
   requireAllowedUser,
   requireOrgAdmin,
 } from './permissions'
@@ -29,17 +30,37 @@ const citationValidator = v.object({
 export const listManuals = query({
   args: {},
   handler: async (ctx) => {
-    await requireAllowedUser(ctx)
+    const identity = await requireAllowedUser(ctx)
     const organization = await getDefaultOrganization(ctx)
-    const manuals = await ctx.db.query('manuals').withIndex('by_slug').take(20)
+    const manuals = await ctx.db.query('manuals').withIndex('by_slug').take(50)
 
-    const visibleManuals = organization
+    const orgManuals = organization
       ? manuals.filter(
           (manual) =>
             manual.organizationId === undefined ||
             manual.organizationId === organization._id,
         )
       : manuals
+
+    const isOrgLevel = isAdminIdentity(identity) || (organization
+      ? await isOrgAdminOrOwner(ctx, organization._id, identity.tokenIdentifier)
+      : false)
+
+    let visibleManuals = orgManuals
+    if (!isOrgLevel) {
+      const userDeptIds = organization
+        ? await getUserDepartmentAdminIds(ctx, organization._id, identity.tokenIdentifier)
+        : new Set<string>()
+
+      visibleManuals = orgManuals.filter((manual) => {
+        const vis = manual.visibility ?? 'org'
+        if (vis === 'org') return true
+        if (vis === 'department' && manual.departmentId) {
+          return userDeptIds.has(manual.departmentId)
+        }
+        return false
+      })
+    }
 
     const results = []
 
@@ -198,10 +219,13 @@ export const internalCreateManualIfMissing = internalMutation({
     title: v.string(),
     slug: v.string(),
     actorTokenIdentifier: v.string(),
+    visibility: v.optional(v.union(v.literal('org'), v.literal('department'), v.literal('restricted'))),
+    departmentId: v.optional(v.id('departments')),
   },
   handler: async (ctx, args) => {
     const organizationId = await getOrCreateDefaultOrganization(ctx)
     const now = Date.now()
+    const visibility = args.visibility ?? 'org'
     const existing = await ctx.db
       .query('manuals')
       .withIndex('by_slug', (q) => q.eq('slug', args.slug))
@@ -210,7 +234,8 @@ export const internalCreateManualIfMissing = internalMutation({
     if (existing) {
       await ctx.db.patch(existing._id, {
         organizationId: existing.organizationId ?? organizationId,
-        visibility: existing.visibility ?? 'org',
+        visibility: existing.visibility ?? visibility,
+        departmentId: existing.departmentId ?? args.departmentId,
         status: existing.status === 'active' ? 'active' : 'indexing',
         updatedAt: now,
       })
@@ -219,7 +244,8 @@ export const internalCreateManualIfMissing = internalMutation({
 
     return await ctx.db.insert('manuals', {
       organizationId,
-      visibility: 'org',
+      departmentId: args.departmentId,
+      visibility,
       title: args.title,
       slug: args.slug,
       status: 'indexing',
@@ -243,23 +269,28 @@ export const internalCreateManualVersion = internalMutation({
     sizeBytes: v.optional(v.number()),
     status: manualStatus,
     actorTokenIdentifier: v.string(),
+    visibility: v.optional(v.union(v.literal('org'), v.literal('department'), v.literal('restricted'))),
+    departmentId: v.optional(v.id('departments')),
+    providerMode: v.optional(v.union(v.literal('legacy_per_manual_store'), v.literal('shared_org_store'))),
   },
   handler: async (ctx, args) => {
     const now = Date.now()
     const manual = await ctx.db.get(args.manualId)
     const organizationId =
       manual?.organizationId ?? (await getOrCreateDefaultOrganization(ctx))
-    const visibility = manual?.visibility ?? 'org'
+    const visibility = args.visibility ?? manual?.visibility ?? 'org'
+    const departmentId = args.departmentId ?? manual?.departmentId
+    const providerMode = args.providerMode ?? 'legacy_per_manual_store'
 
     return await ctx.db.insert('manualVersions', {
       manualId: args.manualId,
       organizationId,
-      departmentId: manual?.departmentId,
+      departmentId,
       visibility,
       versionLabel: args.versionLabel,
       sourceFileName: args.sourceFileName,
       provider: args.provider,
-      providerMode: 'legacy_per_manual_store',
+      providerMode,
       geminiFileSearchStoreName: args.geminiFileSearchStoreName,
       geminiDocumentName: args.geminiFileSearchDocumentName,
       geminiFileSearchDocumentName: args.geminiFileSearchDocumentName,
@@ -467,6 +498,50 @@ async function getActiveManualRecord(ctx: QueryCtx) {
         version.geminiDocumentName ?? version.geminiFileSearchDocumentName,
     },
   }
+}
+
+async function isOrgAdminOrOwner(
+  ctx: QueryCtx,
+  organizationId: Id<'organizations'>,
+  tokenIdentifier: string,
+): Promise<boolean> {
+  const memberships = await ctx.db
+    .query('memberships')
+    .withIndex('by_organizationId_and_userTokenIdentifier', (q) =>
+      q
+        .eq('organizationId', organizationId)
+        .eq('userTokenIdentifier', tokenIdentifier),
+    )
+    .collect()
+
+  return memberships.some(
+    (m) =>
+      m.departmentId === undefined &&
+      (m.role === 'owner' || m.role === 'org_admin'),
+  )
+}
+
+async function getUserDepartmentAdminIds(
+  ctx: QueryCtx,
+  organizationId: Id<'organizations'>,
+  tokenIdentifier: string,
+): Promise<Set<string>> {
+  const memberships = await ctx.db
+    .query('memberships')
+    .withIndex('by_organizationId_and_userTokenIdentifier', (q) =>
+      q
+        .eq('organizationId', organizationId)
+        .eq('userTokenIdentifier', tokenIdentifier),
+    )
+    .collect()
+
+  const deptIds = new Set<string>()
+  for (const m of memberships) {
+    if (m.departmentId && m.role === 'department_admin') {
+      deptIds.add(m.departmentId)
+    }
+  }
+  return deptIds
 }
 
 async function getManualForQuestionRecord(

@@ -182,6 +182,7 @@ function SignedInShell() {
   const { isLoaded: isClerkUserLoaded, user: clerkUser } = useUser()
   const currentUser = useQuery(api.users.getCurrentUser, queryArgs)
   const isAdmin = useQuery(api.users.isCurrentUserAdmin, queryArgs)
+  const uploadInfo = useQuery(api.users.getCurrentUserUploadInfo, protectedQueryArgs)
   const chatSessions = useQuery(api.chats.listChatSessions, protectedQueryArgs)
   const ensureCurrentUserAccess = useMutation(api.users.ensureCurrentUserAccess)
   const setChatPinned = useMutation(api.chats.setChatPinned)
@@ -193,7 +194,8 @@ function SignedInShell() {
     return currentUser.name ?? currentUser.email ?? 'User'
   }, [clerkUser, currentUser])
 
-  const activeView = isAdmin === false && view === 'admin' ? 'chat' : view
+  const canAccessAdmin = isAdmin || (uploadInfo?.canUpload ?? false)
+  const activeView = !canAccessAdmin && view === 'admin' ? 'chat' : view
 
   useEffect(() => {
     if (!isAuthenticated || !isClerkUserLoaded || accessState !== 'idle') return
@@ -327,7 +329,7 @@ function SignedInShell() {
             </svg>
             <span className="nav-label">Documents</span>
           </button>
-          {isAdmin ? (
+          {canAccessAdmin ? (
             <button
               type="button"
               className={activeView === 'admin' ? 'nav-item active' : 'nav-item'}
@@ -400,7 +402,7 @@ function SignedInShell() {
         ) : activeView === 'documents' ? (
           <DocumentsWorkspace canQuery={accessState === 'ready'} />
         ) : (
-          <AdminWorkspace canQuery={accessState === 'ready'} />
+          <AdminWorkspace canQuery={accessState === 'ready'} isOrgAdmin={!!isAdmin} uploadInfo={uploadInfo} />
         )}
       </div>
     </section>
@@ -638,13 +640,29 @@ function DocumentsWorkspace({ canQuery }: { canQuery: boolean }) {
   )
 }
 
-function AdminWorkspace({ canQuery }: { canQuery: boolean }) {
+type UploadInfo = {
+  canUpload: boolean
+  role: 'org_admin' | 'department_admin' | 'member'
+  departments: Array<{ _id: DepartmentId; name: string; slug: string }>
+}
+
+function AdminWorkspace({
+  canQuery,
+  isOrgAdmin,
+  uploadInfo,
+}: {
+  canQuery: boolean
+  isOrgAdmin: boolean
+  uploadInfo: UploadInfo | undefined
+}) {
   const [isIngesting, setIsIngesting] = useState(false)
   const [isUploading, setIsUploading] = useState(false)
   const [isCreatingDepartment, setIsCreatingDepartment] = useState(false)
   const [isAssigningDepartment, setIsAssigningDepartment] = useState(false)
   const [selectedFile, setSelectedFile] = useState<File | null>(null)
   const [manualTitle, setManualTitle] = useState('')
+  const [uploadVisibility, setUploadVisibility] = useState<'org' | 'department'>('org')
+  const [uploadDepartmentId, setUploadDepartmentId] = useState<DepartmentId | ''>('')
   const [departmentName, setDepartmentName] = useState('')
   const [selectedDepartmentId, setSelectedDepartmentId] =
     useState<DepartmentId | ''>('')
@@ -745,6 +763,10 @@ function AdminWorkspace({ canQuery }: { canQuery: boolean }) {
         sourceFileName: selectedFile.name,
         mimeType: selectedFile.type || '',
         sizeBytes: selectedFile.size,
+        visibility: uploadVisibility,
+        departmentId: uploadVisibility === 'department' && uploadDepartmentId
+          ? uploadDepartmentId
+          : undefined,
       })
 
       setMessage(`${result.title} queued for indexing.`)
@@ -850,10 +872,51 @@ function AdminWorkspace({ canQuery }: { canQuery: boolean }) {
               disabled={isUploading}
             />
           </label>
+          <label className="field-label">
+            Visibility
+            <select
+              value={uploadVisibility}
+              onChange={(event) => {
+                const v = event.target.value as 'org' | 'department'
+                setUploadVisibility(v)
+                if (v === 'org') setUploadDepartmentId('')
+              }}
+              disabled={isUploading || (!isOrgAdmin && uploadInfo?.role !== 'org_admin')}
+            >
+              <option value="org">Organization-wide</option>
+              <option value="department">Department only</option>
+            </select>
+          </label>
+          {uploadVisibility === 'department' ? (
+            <label className="field-label">
+              Department
+              <select
+                value={uploadDepartmentId}
+                onChange={(event) =>
+                  setUploadDepartmentId(event.target.value as DepartmentId | '')
+                }
+                disabled={isUploading}
+              >
+                <option value="">Select department</option>
+                {(isOrgAdmin ? (departments ?? []) : (uploadInfo?.departments ?? [])).map(
+                  (dept) => (
+                    <option value={dept._id} key={dept._id}>
+                      {dept.name}
+                    </option>
+                  ),
+                )}
+              </select>
+            </label>
+          ) : null}
           <button
             type="button"
             className="btn btn-primary"
-            disabled={!selectedFile || isUploading || isIngesting}
+            disabled={
+              !selectedFile ||
+              isUploading ||
+              isIngesting ||
+              (uploadVisibility === 'department' && !uploadDepartmentId)
+            }
             onClick={() => void handleUploadManual()}
           >
             {isUploading ? 'Uploading...' : 'Upload and index manual'}
@@ -896,148 +959,154 @@ function AdminWorkspace({ canQuery }: { canQuery: boolean }) {
           }}
         />
 
-        <section className="manual-panel admin-org-panel">
-          <div>
-            <h2>Departments</h2>
-            <p>Create lightweight departments for future scoped manuals.</p>
-          </div>
-          <label className="field-label">
-            Department name
-            <input
-              type="text"
-              value={departmentName}
-              onChange={(event) => setDepartmentName(event.target.value)}
-              placeholder="Flight Operations"
-              disabled={isCreatingDepartment}
+        {isOrgAdmin ? (
+          <section className="manual-panel admin-org-panel">
+            <div>
+              <h2>Departments</h2>
+              <p>Create lightweight departments for future scoped manuals.</p>
+            </div>
+            <label className="field-label">
+              Department name
+              <input
+                type="text"
+                value={departmentName}
+                onChange={(event) => setDepartmentName(event.target.value)}
+                placeholder="Flight Operations"
+                disabled={isCreatingDepartment}
+              />
+            </label>
+            <button
+              type="button"
+              className="btn"
+              disabled={!departmentName.trim() || isCreatingDepartment}
+              onClick={() => void handleCreateDepartment()}
+            >
+              {isCreatingDepartment ? 'Creating...' : 'Create department'}
+            </button>
+            <DepartmentList
+              departments={departments}
+              onArchive={(departmentId) => {
+                void archiveDepartment({ departmentId }).then(() => {
+                  setMessage('Department archived')
+                }).catch((err) => {
+                  setError(err instanceof Error ? err.message : 'Archive failed')
+                })
+              }}
             />
-          </label>
-          <button
-            type="button"
-            className="btn"
-            disabled={!departmentName.trim() || isCreatingDepartment}
-            onClick={() => void handleCreateDepartment()}
-          >
-            {isCreatingDepartment ? 'Creating...' : 'Create department'}
-          </button>
-          <DepartmentList
-            departments={departments}
-            onArchive={(departmentId) => {
-              void archiveDepartment({ departmentId }).then(() => {
-                setMessage('Department archived')
-              }).catch((err) => {
-                setError(err instanceof Error ? err.message : 'Archive failed')
-              })
-            }}
-          />
-        </section>
+          </section>
+        ) : null}
 
-        <section className="manual-panel admin-org-panel">
-          <div>
-            <h2>Users</h2>
-            <p>Manage user access. Suspended users cannot use the app.</p>
-          </div>
-          <UserList
-            users={users}
-            onSuspend={(userId) => {
-              void suspendUser({ userId }).then(() => {
-                setMessage('User suspended')
-              }).catch((err) => {
-                setError(err instanceof Error ? err.message : 'Suspend failed')
-              })
-            }}
-            onUnsuspend={(userId) => {
-              void unsuspendUser({ userId }).then(() => {
-                setMessage('User unsuspended')
-              }).catch((err) => {
-                setError(err instanceof Error ? err.message : 'Unsuspend failed')
-              })
-            }}
-          />
-        </section>
+        {isOrgAdmin ? (
+          <section className="manual-panel admin-org-panel">
+            <div>
+              <h2>Users</h2>
+              <p>Manage user access. Suspended users cannot use the app.</p>
+            </div>
+            <UserList
+              users={users}
+              onSuspend={(userId) => {
+                void suspendUser({ userId }).then(() => {
+                  setMessage('User suspended')
+                }).catch((err) => {
+                  setError(err instanceof Error ? err.message : 'Suspend failed')
+                })
+              }}
+              onUnsuspend={(userId) => {
+                void unsuspendUser({ userId }).then(() => {
+                  setMessage('User unsuspended')
+                }).catch((err) => {
+                  setError(err instanceof Error ? err.message : 'Unsuspend failed')
+                })
+              }}
+            />
+          </section>
+        ) : null}
 
-        <section className="manual-panel admin-org-panel">
-          <div>
-            <h2>Department membership</h2>
-            <p>Users appear here after they sign in once.</p>
-          </div>
-          <label className="field-label">
-            Existing user
-            <select
-              value={selectedUserTokenIdentifier}
-              onChange={(event) =>
-                setSelectedUserTokenIdentifier(event.target.value)
+        {isOrgAdmin ? (
+          <section className="manual-panel admin-org-panel">
+            <div>
+              <h2>Department membership</h2>
+              <p>Users appear here after they sign in once.</p>
+            </div>
+            <label className="field-label">
+              Existing user
+              <select
+                value={selectedUserTokenIdentifier}
+                onChange={(event) =>
+                  setSelectedUserTokenIdentifier(event.target.value)
+                }
+                disabled={isAssigningDepartment}
+              >
+                <option value="">Select user</option>
+                {(users ?? []).map((user: AppUser) => (
+                  <option value={user.tokenIdentifier} key={user._id}>
+                    {user.email ?? user.name ?? user.tokenIdentifier}
+                  </option>
+                ))}
+              </select>
+            </label>
+            <label className="field-label">
+              Department
+              <select
+                value={selectedDepartmentId}
+                onChange={(event) =>
+                  setSelectedDepartmentId(event.target.value as DepartmentId | '')
+                }
+                disabled={isAssigningDepartment}
+              >
+                <option value="">Select department</option>
+                {(departments ?? []).map((department: Department) => (
+                  <option value={department._id} key={department._id}>
+                    {department.name}
+                  </option>
+                ))}
+              </select>
+            </label>
+            <label className="field-label">
+              Role
+              <select
+                value={departmentRole}
+                onChange={(event) =>
+                  setDepartmentRole(
+                    event.target.value as 'member' | 'department_admin',
+                  )
+                }
+                disabled={isAssigningDepartment}
+              >
+                <option value="member">Member</option>
+                <option value="department_admin">Department admin</option>
+              </select>
+            </label>
+            <button
+              type="button"
+              className="btn"
+              disabled={
+                !selectedUserTokenIdentifier ||
+                !selectedDepartmentId ||
+                isAssigningDepartment
               }
-              disabled={isAssigningDepartment}
+              onClick={() => void handleAssignDepartment()}
             >
-              <option value="">Select user</option>
-              {(users ?? []).map((user: AppUser) => (
-                <option value={user.tokenIdentifier} key={user._id}>
-                  {user.email ?? user.name ?? user.tokenIdentifier}
-                </option>
-              ))}
-            </select>
-          </label>
-          <label className="field-label">
-            Department
-            <select
-              value={selectedDepartmentId}
-              onChange={(event) =>
-                setSelectedDepartmentId(event.target.value as DepartmentId | '')
-              }
-              disabled={isAssigningDepartment}
-            >
-              <option value="">Select department</option>
-              {(departments ?? []).map((department: Department) => (
-                <option value={department._id} key={department._id}>
-                  {department.name}
-                </option>
-              ))}
-            </select>
-          </label>
-          <label className="field-label">
-            Role
-            <select
-              value={departmentRole}
-              onChange={(event) =>
-                setDepartmentRole(
-                  event.target.value as 'member' | 'department_admin',
-                )
-              }
-              disabled={isAssigningDepartment}
-            >
-              <option value="member">Member</option>
-              <option value="department_admin">Department admin</option>
-            </select>
-          </label>
-          <button
-            type="button"
-            className="btn"
-            disabled={
-              !selectedUserTokenIdentifier ||
-              !selectedDepartmentId ||
-              isAssigningDepartment
-            }
-            onClick={() => void handleAssignDepartment()}
-          >
-            {isAssigningDepartment ? 'Assigning...' : 'Assign department'}
-          </button>
-          <DepartmentMemberList
-            members={departmentMembers}
-            users={users}
-            onRemove={(userTokenIdentifier) => {
-              if (!selectedDepartmentId) return
+              {isAssigningDepartment ? 'Assigning...' : 'Assign department'}
+            </button>
+            <DepartmentMemberList
+              members={departmentMembers}
+              users={users}
+              onRemove={(userTokenIdentifier) => {
+                if (!selectedDepartmentId) return
 
-              void removeDepartmentMembership({
-                departmentId: selectedDepartmentId,
-                userTokenIdentifier,
-              }).then(() => {
-                setMessage('Department membership removed')
-              }).catch((err) => {
-                setError(err instanceof Error ? err.message : 'Remove failed')
-              })
-            }}
-          />
-        </section>
+                void removeDepartmentMembership({
+                  departmentId: selectedDepartmentId,
+                  userTokenIdentifier,
+                }).then(() => {
+                  setMessage('Department membership removed')
+                }).catch((err) => {
+                  setError(err instanceof Error ? err.message : 'Remove failed')
+                })
+              }}
+            />
+          </section>
+        ) : null}
       </div>
     </>
   )

@@ -205,9 +205,15 @@ export const ingestUploadedManual = action({
     sourceFileName: v.string(),
     mimeType: v.string(),
     sizeBytes: v.number(),
+    visibility: v.optional(v.union(v.literal('org'), v.literal('department'), v.literal('restricted'))),
+    departmentId: v.optional(v.id('departments')),
   },
   handler: async (ctx, args): Promise<IngestUploadedManualResult> => {
-    const admin = await ctx.runQuery(internal.users.internalRequireOrgAdmin, {})
+    const visibility = args.visibility ?? 'org'
+    const permission = await ctx.runQuery(
+      internal.users.internalRequireManualUploadPermission,
+      { visibility, departmentId: args.departmentId },
+    )
     const fileInfo = validateManualUpload(args)
     const slug = slugify(fileInfo.title)
 
@@ -216,7 +222,9 @@ export const ingestUploadedManual = action({
       {
         title: fileInfo.title,
         slug,
-        actorTokenIdentifier: admin.identity.tokenIdentifier,
+        actorTokenIdentifier: permission.identity.tokenIdentifier,
+        visibility: permission.effectiveVisibility,
+        departmentId: permission.effectiveDepartmentId,
       },
     )
     const versionLabel = `upload-${Date.now()}`
@@ -230,7 +238,10 @@ export const ingestUploadedManual = action({
         mimeType: fileInfo.mimeType,
         sizeBytes: fileInfo.sizeBytes,
         status: 'indexing',
-        actorTokenIdentifier: admin.identity.tokenIdentifier,
+        actorTokenIdentifier: permission.identity.tokenIdentifier,
+        visibility: permission.effectiveVisibility,
+        departmentId: permission.effectiveDepartmentId,
+        providerMode: 'shared_org_store',
       },
     )
     const ingestionJobId: Id<'ingestionJobs'> = await ctx.runMutation(
@@ -238,10 +249,10 @@ export const ingestUploadedManual = action({
       {
         manualId,
         manualVersionId,
-        organizationId: admin.organizationId,
+        organizationId: permission.organizationId,
         storageId: args.storageId,
         maxAttempts: UPLOAD_JOB_MAX_ATTEMPTS,
-        actorTokenIdentifier: admin.identity.tokenIdentifier,
+        actorTokenIdentifier: permission.identity.tokenIdentifier,
       },
     )
 
@@ -323,27 +334,75 @@ export const internalRunIngestionJob = internalAction({
 
       const apiKey = readRequiredEnv('GEMINI_API_KEY')
       const ai = new GoogleGenAI({ apiKey })
-      const fileSearchStore = await ai.fileSearchStores.create({
-        config: {
-          displayName: `${manual.title} ${Date.now()}`,
-        },
-      })
 
-      if (!fileSearchStore.name) {
-        throw new Error('Gemini did not return a File Search store name.')
+      const isSharedStore = manualVersion.providerMode === 'shared_org_store'
+      let storeName: string
+
+      if (isSharedStore) {
+        const existingStoreName: string | null = await ctx.runQuery(
+          internal.users.internalGetOrgStoreName,
+          { organizationId: job.organizationId },
+        )
+
+        if (existingStoreName) {
+          storeName = existingStoreName
+        } else {
+          const newStore = await ai.fileSearchStores.create({
+            config: {
+              displayName: `org-store-${job.organizationId}`,
+            },
+          })
+          if (!newStore.name) {
+            throw new Error('Gemini did not return a File Search store name.')
+          }
+          storeName = await ctx.runMutation(
+            internal.users.internalGetOrCreateOrgStore,
+            {
+              organizationId: job.organizationId,
+              geminiFileSearchStoreName: newStore.name,
+            },
+          )
+        }
+      } else {
+        const fileSearchStore = await ai.fileSearchStores.create({
+          config: {
+            displayName: `${manual.title} ${Date.now()}`,
+          },
+        })
+        if (!fileSearchStore.name) {
+          throw new Error('Gemini did not return a File Search store name.')
+        }
+        storeName = fileSearchStore.name
       }
 
+      const customMetadata = isSharedStore
+        ? [
+            { key: 'organizationId', stringValue: job.organizationId },
+            { key: 'visibility', stringValue: manualVersion.visibility ?? 'org' },
+            {
+              key: 'departmentId',
+              stringValue:
+                manualVersion.visibility === 'department' && manualVersion.departmentId
+                  ? manualVersion.departmentId
+                  : 'org',
+            },
+            { key: 'manualId', stringValue: manual._id },
+            { key: 'manualVersionId', stringValue: manualVersion._id },
+            { key: 'status', stringValue: 'active' },
+          ]
+        : [
+            { key: 'manual_slug', stringValue: manual.slug },
+            { key: 'manual_version', stringValue: manualVersion.versionLabel },
+            { key: 'source_file_name', stringValue: manualVersion.sourceFileName },
+          ]
+
       const operation = await ai.fileSearchStores.uploadToFileSearchStore({
-        fileSearchStoreName: fileSearchStore.name,
+        fileSearchStoreName: storeName,
         file: fileBlob,
         config: {
           displayName: manualVersion.sourceFileName,
           mimeType: manualVersion.mimeType,
-          customMetadata: [
-            { key: 'manual_slug', stringValue: manual.slug },
-            { key: 'manual_version', stringValue: manualVersion.versionLabel },
-            { key: 'source_file_name', stringValue: manualVersion.sourceFileName },
-          ],
+          customMetadata,
         },
       })
       const documentName = extractStringField(operation.response, 'documentName')
@@ -354,7 +413,7 @@ export const internalRunIngestionJob = internalAction({
         ingestionJobId: job._id,
         manualVersionId: manualVersion._id,
         geminiOperationName: operation.name,
-        geminiFileSearchStoreName: fileSearchStore.name,
+        geminiFileSearchStoreName: storeName,
         geminiDocumentName: documentName,
         geminiFileName: fileName,
         nextPollAt,
