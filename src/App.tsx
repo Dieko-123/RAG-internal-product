@@ -788,15 +788,15 @@ function AdminWorkspace({
   )
   const departments = useQuery(
     api.departments.listDepartments,
-    canQuery ? {} : 'skip',
+    canQuery && isOrgAdmin ? {} : 'skip',
   )
   const users = useQuery(
     api.users.listExistingUsersForAdmin,
-    canQuery ? {} : 'skip',
+    canQuery && isOrgAdmin ? {} : 'skip',
   )
   const departmentMembers = useQuery(
     api.departments.listDepartmentMembers,
-    canQuery && selectedDepartmentId
+    canQuery && isOrgAdmin && selectedDepartmentId
       ? { departmentId: selectedDepartmentId }
       : 'skip',
   )
