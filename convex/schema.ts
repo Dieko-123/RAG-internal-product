@@ -172,6 +172,10 @@ export default defineSchema({
       'userTokenIdentifier',
       'updatedAt',
     ])
+    .index('by_userTokenIdentifier_and_pinned', [
+      'userTokenIdentifier',
+      'pinned',
+    ])
     .index('by_manualId', ['manualId']),
 
   chatMessages: defineTable({

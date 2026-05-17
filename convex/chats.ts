@@ -16,13 +16,26 @@ export const listChatSessions = query({
   handler: async (ctx) => {
     const user = await requireAllowedUser(ctx)
 
-    const sessions = await ctx.db
+    const recentSessions = await ctx.db
       .query('chatSessions')
       .withIndex('by_userTokenIdentifier_and_updatedAt', (q) =>
         q.eq('userTokenIdentifier', user.tokenIdentifier),
       )
       .order('desc')
       .take(40)
+    const pinnedSessions = await ctx.db
+      .query('chatSessions')
+      .withIndex('by_userTokenIdentifier_and_pinned', (q) =>
+        q.eq('userTokenIdentifier', user.tokenIdentifier).eq('pinned', true),
+      )
+      .take(40)
+    const sessionsById = new Map(
+      [...pinnedSessions, ...recentSessions].map((session) => [
+        session._id,
+        session,
+      ]),
+    )
+    const sessions = [...sessionsById.values()]
 
     return sessions.sort((a, b) => {
       if (Boolean(a.pinned) !== Boolean(b.pinned)) {
