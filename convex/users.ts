@@ -83,7 +83,7 @@ export const ensureCurrentUserAccess = mutation({
             acceptedAt: now,
           })
 
-          if (pendingInvite.role !== result.role) {
+          if (!pendingInvite.departmentId && pendingInvite.role !== result.role) {
             const orgMembership = await ctx.db
               .query('memberships')
               .withIndex('by_organizationId_and_userTokenIdentifier', (q) =>
