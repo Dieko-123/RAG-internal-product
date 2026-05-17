@@ -1,6 +1,6 @@
 'use node'
 
-import { GoogleGenAI, type UploadToFileSearchStoreOperation } from '@google/genai'
+import { GoogleGenAI, UploadToFileSearchStoreOperation } from '@google/genai'
 import { v } from 'convex/values'
 import { internal } from './_generated/api'
 import type { Id } from './_generated/dataModel'
@@ -504,10 +504,10 @@ export const internalPollIngestionJob = internalAction({
     try {
       const apiKey = readRequiredEnv('GEMINI_API_KEY')
       const ai = new GoogleGenAI({ apiKey })
+      const operationRequest = new UploadToFileSearchStoreOperation()
+      operationRequest.name = job.geminiOperationName
       const operation = (await ai.operations.get({
-        // The installed @google/genai SDK types accept an Operation object; name
-        // is the serializable field required to resume polling in a later action.
-        operation: { name: job.geminiOperationName } as UploadToFileSearchStoreOperation,
+        operation: operationRequest,
       })) as unknown as UploadToFileSearchStoreOperation
 
       if (operation.error) {
