@@ -62,6 +62,89 @@ export const ensureCurrentUserAccess = mutation({
       nameOverride: args.name,
     })
 
+    const emailNormalized = (args.email ?? result.identity.email)?.toLowerCase()?.trim()
+    if (emailNormalized) {
+      const pendingInvite = await ctx.db
+        .query('invites')
+        .withIndex('by_emailNormalized_and_status', (q) =>
+          q.eq('emailNormalized', emailNormalized).eq('status', 'pending'),
+        )
+        .first()
+
+      if (
+        pendingInvite &&
+        pendingInvite.organizationId === result.organizationId
+      ) {
+        if (!pendingInvite.expiresAt || pendingInvite.expiresAt >= Date.now()) {
+          const now = Date.now()
+          await ctx.db.patch(pendingInvite._id, {
+            status: 'accepted',
+            acceptedByTokenIdentifier: result.identity.tokenIdentifier,
+            acceptedAt: now,
+          })
+
+          if (
+            pendingInvite.role === 'org_admin' &&
+            result.role !== 'org_admin'
+          ) {
+            const orgMembership = await ctx.db
+              .query('memberships')
+              .withIndex('by_organizationId_and_userTokenIdentifier', (q) =>
+                q
+                  .eq('organizationId', result.organizationId)
+                  .eq('userTokenIdentifier', result.identity.tokenIdentifier),
+              )
+              .filter((q) => q.eq(q.field('departmentId'), undefined))
+              .unique()
+
+            if (orgMembership) {
+              await ctx.db.patch(orgMembership._id, {
+                role: 'org_admin',
+                updatedAt: now,
+              })
+            }
+          }
+
+          if (pendingInvite.departmentId) {
+            const existingDeptMembership = await ctx.db
+              .query('memberships')
+              .withIndex('by_departmentId_and_userTokenIdentifier', (q) =>
+                q
+                  .eq('departmentId', pendingInvite.departmentId!)
+                  .eq('userTokenIdentifier', result.identity.tokenIdentifier),
+              )
+              .unique()
+
+            if (!existingDeptMembership) {
+              await ctx.db.insert('memberships', {
+                organizationId: result.organizationId,
+                departmentId: pendingInvite.departmentId,
+                userTokenIdentifier: result.identity.tokenIdentifier,
+                role: pendingInvite.departmentRole ?? 'member',
+                createdAt: now,
+                updatedAt: now,
+              })
+            }
+          }
+
+          await ctx.db.insert('auditEvents', {
+            actorTokenIdentifier: result.identity.tokenIdentifier,
+            action: 'invite_accepted',
+            targetType: 'invite',
+            targetId: pendingInvite._id,
+            metadata: {
+              email: pendingInvite.email,
+              role: pendingInvite.role,
+              departmentId: pendingInvite.departmentId ?? '',
+            },
+            createdAt: now,
+          })
+        } else {
+          await ctx.db.patch(pendingInvite._id, { status: 'expired' })
+        }
+      }
+    }
+
     return {
       organizationId: result.organizationId,
       role: result.role,

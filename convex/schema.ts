@@ -233,6 +233,34 @@ export default defineSchema({
     .index('by_chatSessionId', ['chatSessionId'])
     .index('by_userTokenIdentifier', ['userTokenIdentifier']),
 
+  invites: defineTable({
+    organizationId: v.id('organizations'),
+    email: v.string(),
+    emailNormalized: v.string(),
+    role: v.union(v.literal('org_admin'), v.literal('member'), v.literal('viewer')),
+    departmentId: v.optional(v.id('departments')),
+    departmentRole: v.optional(
+      v.union(v.literal('department_admin'), v.literal('member'), v.literal('viewer')),
+    ),
+    status: v.union(
+      v.literal('pending'),
+      v.literal('accepted'),
+      v.literal('revoked'),
+      v.literal('expired'),
+    ),
+    clerkInvitationId: v.optional(v.string()),
+    invitedByTokenIdentifier: v.string(),
+    acceptedByTokenIdentifier: v.optional(v.string()),
+    createdAt: v.number(),
+    acceptedAt: v.optional(v.number()),
+    revokedAt: v.optional(v.number()),
+    expiresAt: v.optional(v.number()),
+  })
+    .index('by_organizationId', ['organizationId'])
+    .index('by_emailNormalized_and_status', ['emailNormalized', 'status'])
+    .index('by_organizationId_and_status', ['organizationId', 'status'])
+    .index('by_departmentId', ['departmentId']),
+
   auditEvents: defineTable({
     actorTokenIdentifier: v.string(),
     action: v.string(),

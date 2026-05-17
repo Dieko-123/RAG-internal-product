@@ -14,6 +14,8 @@ import type * as departments from "../departments.js";
 import type * as fixtures_dummyManual from "../fixtures/dummyManual.js";
 import type * as gemini from "../gemini.js";
 import type * as ingestionJobs from "../ingestionJobs.js";
+import type * as invites from "../invites.js";
+import type * as invitesQueries from "../invitesQueries.js";
 import type * as manuals from "../manuals.js";
 import type * as permissions from "../permissions.js";
 import type * as users from "../users.js";
@@ -31,6 +33,8 @@ declare const fullApi: ApiFromModules<{
   "fixtures/dummyManual": typeof fixtures_dummyManual;
   gemini: typeof gemini;
   ingestionJobs: typeof ingestionJobs;
+  invites: typeof invites;
+  invitesQueries: typeof invitesQueries;
   manuals: typeof manuals;
   permissions: typeof permissions;
   users: typeof users;
