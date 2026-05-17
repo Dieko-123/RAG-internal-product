@@ -1133,3 +1133,89 @@
     width: 100%;
   }
 }
+
+/* Manual multi-select */
+.manual-selector {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  max-width: 480px;
+  margin-bottom: 16px;
+  padding: 12px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--bg-secondary, #f9fafb);
+  max-height: 220px;
+  overflow-y: auto;
+}
+
+.manual-checkbox {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 8px 10px;
+  border-radius: 6px;
+  cursor: pointer;
+  transition: background 0.12s;
+  font-size: 14px;
+}
+
+.manual-checkbox:hover {
+  background: var(--bg-hover, #f1f3f5);
+}
+
+.manual-checkbox.checked {
+  background: var(--bg-accent, #e8f4f8);
+}
+
+.manual-checkbox.disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+.manual-checkbox input[type='checkbox'] {
+  width: 16px;
+  height: 16px;
+  accent-color: var(--brand, #2563eb);
+}
+
+.manual-checkbox-title {
+  flex: 1;
+  font-weight: 500;
+}
+
+.manual-checkbox-meta {
+  font-size: 12px;
+  color: var(--muted);
+  text-transform: capitalize;
+}
+
+.scope-locked-notice {
+  font-size: 13px;
+  color: var(--muted);
+  margin-bottom: 12px;
+  padding: 8px 12px;
+  border-left: 3px solid var(--border);
+  background: var(--bg-secondary, #f9fafb);
+  border-radius: 0 6px 6px 0;
+}
+
+.message-scope-warning {
+  font-size: 12px;
+  color: var(--warning-text, #92400e);
+  background: var(--warning-bg, #fef3c7);
+  padding: 6px 10px;
+  border-radius: 4px;
+  margin-bottom: 8px;
+}
+
+.citation-group {
+  margin-bottom: 8px;
+}
+
+.citation-group-title {
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--muted);
+  margin-bottom: 4px;
+}

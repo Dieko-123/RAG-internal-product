@@ -1,7 +1,11 @@
 import { v } from 'convex/values'
-import { internalMutation, mutation, query } from './_generated/server'
+import { internalMutation, internalQuery, mutation, query } from './_generated/server'
 import type { MutationCtx } from './_generated/server'
-import { getDefaultOrganization, requireAllowedUser } from './permissions'
+import type { Id } from './_generated/dataModel'
+import {
+  getDefaultOrganization,
+  requireAllowedUser,
+} from './permissions'
 
 const citationValidator = v.object({
   title: v.optional(v.string()),
@@ -203,6 +207,225 @@ export const internalRecordChatExchange = internalMutation({
       chatSessionId,
       assistantMessageId,
     }
+  },
+})
+
+export const internalLockChatScope = internalMutation({
+  args: {
+    userTokenIdentifier: v.string(),
+    organizationId: v.id('organizations'),
+    selectedManualIds: v.array(v.id('manuals')),
+    title: v.string(),
+  },
+  handler: async (ctx, args) => {
+    const deduped = [...new Set(args.selectedManualIds)]
+
+    if (deduped.length < 1 || deduped.length > 5) {
+      throw new Error('Select between 1 and 5 manuals.')
+    }
+
+    const org = await ctx.db.get(args.organizationId)
+    if (!org) {
+      throw new Error('Organization not found.')
+    }
+
+    const memberships = await ctx.db
+      .query('memberships')
+      .withIndex('by_organizationId_and_userTokenIdentifier', (q) =>
+        q
+          .eq('organizationId', args.organizationId)
+          .eq('userTokenIdentifier', args.userTokenIdentifier),
+      )
+      .collect()
+
+    const isOrgLevel = memberships.some(
+      (m) =>
+        m.departmentId === undefined &&
+        (m.role === 'owner' || m.role === 'org_admin'),
+    )
+
+    const userDeptIds = new Set<string>()
+    for (const m of memberships) {
+      if (m.departmentId) {
+        userDeptIds.add(m.departmentId)
+      }
+    }
+
+    const now = Date.now()
+    const resolvedVersions: Array<{
+      manualId: Id<'manuals'>
+      manualVersionId: Id<'manualVersions'>
+      title: string
+      sourceFileName: string
+    }> = []
+
+    for (const manualId of deduped) {
+      const manual = await ctx.db.get(manualId)
+      if (!manual) {
+        throw new Error(`Manual not found.`)
+      }
+
+      if (manual.organizationId !== args.organizationId) {
+        throw new Error(`Manual "${manual.title}" does not belong to this organization.`)
+      }
+
+      if (manual.status !== 'active') {
+        throw new Error(`Manual "${manual.title}" is not active.`)
+      }
+
+      const vis = manual.visibility ?? 'org'
+      if (vis === 'restricted') {
+        throw new Error(`Manual "${manual.title}" is not available for search.`)
+      }
+
+      if (vis === 'department' && manual.departmentId && !isOrgLevel) {
+        if (!userDeptIds.has(manual.departmentId)) {
+          throw new Error(
+            `You do not have access to manual "${manual.title}".`,
+          )
+        }
+      }
+
+      if (!manual.currentVersionId) {
+        throw new Error(`Manual "${manual.title}" has no active version.`)
+      }
+
+      const version = await ctx.db.get(manual.currentVersionId)
+      if (!version || version.status !== 'active') {
+        throw new Error(`Manual "${manual.title}" version is not active.`)
+      }
+      if ((version.providerMode ?? 'legacy_per_manual_store') !== 'shared_org_store') {
+        throw new Error(
+          `Manual "${manual.title}" is not available for multi-manual search.`,
+        )
+      }
+
+      resolvedVersions.push({
+        manualId: manual._id,
+        manualVersionId: version._id,
+        title: manual.title,
+        sourceFileName: version.sourceFileName,
+      })
+    }
+
+    const selectedManualVersionIds = resolvedVersions.map((r) => r.manualVersionId)
+    const chatSessionId = await ctx.db.insert('chatSessions', {
+      userTokenIdentifier: args.userTokenIdentifier,
+      organizationId: args.organizationId,
+      scopeMode: 'selected',
+      selectedManualIds: deduped,
+      selectedManualVersionIds,
+      manualId: resolvedVersions[0].manualId,
+      manualVersionId: resolvedVersions[0].manualVersionId,
+      title: normalizeTitle(args.title),
+      pinned: false,
+      createdAt: now,
+      updatedAt: now,
+    })
+
+    return {
+      chatSessionId,
+      selectedManualVersionIds,
+      resolvedVersions,
+    }
+  },
+})
+
+export const internalGetLockedScope = internalQuery({
+  args: {
+    chatSessionId: v.id('chatSessions'),
+    userTokenIdentifier: v.string(),
+  },
+  handler: async (ctx, args) => {
+    const session = await ctx.db.get(args.chatSessionId)
+    if (!session || session.userTokenIdentifier !== args.userTokenIdentifier) {
+      throw new Error('Chat not found')
+    }
+
+    const selectedManualVersionIds =
+      session.selectedManualVersionIds && session.selectedManualVersionIds.length > 0
+        ? session.selectedManualVersionIds
+        : [session.manualVersionId]
+
+    const selectedManualIds =
+      session.selectedManualIds && session.selectedManualIds.length > 0
+        ? session.selectedManualIds
+        : [session.manualId]
+
+    return {
+      chatSessionId: session._id,
+      organizationId: session.organizationId,
+      selectedManualIds,
+      selectedManualVersionIds,
+    }
+  },
+})
+
+export const internalRecordMultiManualExchange = internalMutation({
+  args: {
+    chatSessionId: v.id('chatSessions'),
+    userTokenIdentifier: v.string(),
+    title: v.string(),
+    question: v.string(),
+    answerText: v.string(),
+    refusal: v.boolean(),
+    citations: v.array(
+      v.object({
+        title: v.optional(v.string()),
+        uri: v.optional(v.string()),
+        pageNumber: v.optional(v.number()),
+        excerpt: v.optional(v.string()),
+        fileSearchStore: v.optional(v.string()),
+        manualId: v.optional(v.string()),
+        manualVersionId: v.optional(v.string()),
+        sourceFileName: v.optional(v.string()),
+        providerUri: v.optional(v.string()),
+      }),
+    ),
+    warning: v.optional(v.string()),
+    model: v.string(),
+    latencyMs: v.number(),
+    sourceFileName: v.string(),
+  },
+  handler: async (ctx, args) => {
+    const now = Date.now()
+    const session = await ctx.db.get(args.chatSessionId)
+    if (!session || session.userTokenIdentifier !== args.userTokenIdentifier) {
+      throw new Error('Chat not found')
+    }
+
+    const shouldRetitle = session.title === 'New chat'
+
+    await ctx.db.insert('chatMessages', {
+      chatSessionId: args.chatSessionId,
+      userTokenIdentifier: args.userTokenIdentifier,
+      role: 'user',
+      content: args.question,
+      createdAt: now,
+    })
+
+    await ctx.db.insert('chatMessages', {
+      chatSessionId: args.chatSessionId,
+      userTokenIdentifier: args.userTokenIdentifier,
+      role: 'assistant',
+      content: args.answerText,
+      refusal: args.refusal,
+      citations: args.citations,
+      warning: args.warning,
+      model: args.model,
+      latencyMs: args.latencyMs,
+      sourceFileName: args.sourceFileName,
+      createdAt: now + 1,
+    })
+
+    await ctx.db.patch(
+      args.chatSessionId,
+      shouldRetitle
+        ? { title: normalizeTitle(args.title), updatedAt: now }
+        : { updatedAt: now },
+    )
+
+    return { chatSessionId: args.chatSessionId }
   },
 })
 
