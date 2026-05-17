@@ -728,6 +728,446 @@ export const askManualQuestion = action({
   },
 })
 
+type MultiManualQuestionResult = {
+  chatSessionId: Id<'chatSessions'>
+  answerText: string
+  refusal: boolean
+  citations: Array<{
+    title?: string
+    manualId?: string
+    manualVersionId?: string
+    sourceFileName?: string
+    excerpt?: string
+    pageNumber?: number
+    providerUri?: string
+  }>
+  warning?: string
+  effectiveManualIds: string[]
+  effectiveManualVersionIds: string[]
+  excludedManuals?: Array<{
+    manualId: string
+    manualVersionId?: string
+    title?: string
+    reason: string
+  }>
+  latencyMs: number
+  model: string
+}
+
+export const askMultiManualQuestion = action({
+  args: {
+    question: v.string(),
+    chatSessionId: v.optional(v.id('chatSessions')),
+    selectedManualIds: v.optional(v.array(v.id('manuals'))),
+  },
+  handler: async (ctx, args): Promise<MultiManualQuestionResult> => {
+    const user = await ctx.runQuery(internal.users.internalRequireAllowedUser, {})
+    const question = args.question.trim()
+    if (!question) {
+      throw new Error('Question is required')
+    }
+
+    let chatSessionId = args.chatSessionId
+    let selectedManualVersionIds: Id<'manualVersions'>[]
+
+    if (chatSessionId) {
+      const lockedScope: {
+        chatSessionId: Id<'chatSessions'>
+        organizationId?: Id<'organizations'>
+        selectedManualIds: Id<'manuals'>[]
+        selectedManualVersionIds: Id<'manualVersions'>[]
+      } = await ctx.runQuery(internal.chats.internalGetLockedScope, {
+        chatSessionId,
+        userTokenIdentifier: user.tokenIdentifier,
+      })
+      selectedManualVersionIds = lockedScope.selectedManualVersionIds
+    } else {
+      if (!args.selectedManualIds || args.selectedManualIds.length === 0) {
+        throw new Error('Select at least one manual.')
+      }
+      if (args.selectedManualIds.length > 5) {
+        throw new Error('Select at most 5 manuals.')
+      }
+
+      const orgId = await getOrgIdForUser(ctx)
+
+      const lockResult: {
+        chatSessionId: Id<'chatSessions'>
+        selectedManualVersionIds: Id<'manualVersions'>[]
+        resolvedVersions: Array<{
+          manualId: Id<'manuals'>
+          manualVersionId: Id<'manualVersions'>
+          title: string
+          sourceFileName: string
+        }>
+      } = await ctx.runMutation(internal.chats.internalLockChatScope, {
+        userTokenIdentifier: user.tokenIdentifier,
+        organizationId: orgId,
+        selectedManualIds: args.selectedManualIds,
+        title: question,
+      })
+
+      chatSessionId = lockResult.chatSessionId
+      selectedManualVersionIds = lockResult.selectedManualVersionIds
+    }
+
+    const scopeData: {
+      effective: Array<{
+        manualId: Id<'manuals'>
+        manualVersionId: Id<'manualVersions'>
+        title: string
+        sourceFileName: string
+        geminiFileName?: string
+        geminiDocumentName?: string
+        geminiFileSearchStoreName?: string
+        providerMode: string
+      }>
+      excluded: Array<{
+        manualId: string
+        manualVersionId: string
+        title?: string
+        reason: string
+      }>
+      organizationId: Id<'organizations'>
+      orgStoreName?: string
+    } = await ctx.runQuery(internal.manuals.internalGetManualVersionsForScope, {
+      manualVersionIds: selectedManualVersionIds,
+      userTokenIdentifier: user.tokenIdentifier,
+    })
+
+    if (scopeData.effective.length === 0) {
+      const errorResult: MultiManualQuestionResult = {
+        chatSessionId: chatSessionId!,
+        answerText: 'The manuals in this chat\'s scope are no longer available.',
+        refusal: true,
+        citations: [],
+        effectiveManualIds: [],
+        effectiveManualVersionIds: [],
+        excludedManuals: scopeData.excluded,
+        latencyMs: 0,
+        model: '',
+      }
+
+      await ctx.runMutation(internal.chats.internalRecordMultiManualExchange, {
+        chatSessionId: chatSessionId!,
+        userTokenIdentifier: user.tokenIdentifier,
+        title: question,
+        question,
+        answerText: errorResult.answerText,
+        refusal: true,
+        citations: [],
+        warning: 'The manuals in this chat\'s scope are no longer available.',
+        model: '',
+        latencyMs: 0,
+        sourceFileName: '',
+      })
+
+      return errorResult
+    }
+
+    const warning =
+      scopeData.excluded.length > 0
+        ? buildExcludedWarning(scopeData.excluded)
+        : undefined
+
+    const storeName = scopeData.orgStoreName
+    if (!storeName) {
+      throw new Error('Organization store is not configured.')
+    }
+
+    const model = process.env.GEMINI_DEFAULT_MODEL?.trim() || DEFAULT_MODEL
+    const apiKey = readRequiredEnv('GEMINI_API_KEY')
+    const ai = new GoogleGenAI({ apiKey })
+    const startedAt = Date.now()
+
+    const orgId = scopeData.organizationId
+    const cachedFilterMode: string | null = await ctx.runQuery(
+      internal.users.internalGetOrgFilterMode,
+      { organizationId: orgId },
+    )
+
+    let response: Awaited<ReturnType<typeof ai.models.generateContent>>
+    let usedFilterMode: 'or_syntax' | 'multi_entry'
+
+    if (cachedFilterMode === 'multi_entry') {
+      response = await callGeminiMultiEntry(ai, model, question, storeName, scopeData.effective)
+      usedFilterMode = 'multi_entry'
+    } else if (cachedFilterMode === 'or_syntax') {
+      response = await callGeminiOrSyntax(ai, model, question, storeName, scopeData.effective)
+      usedFilterMode = 'or_syntax'
+    } else {
+      try {
+        response = await callGeminiOrSyntax(ai, model, question, storeName, scopeData.effective)
+        usedFilterMode = 'or_syntax'
+        await ctx.runMutation(internal.users.internalSetOrgFilterMode, {
+          organizationId: orgId,
+          geminiFilterMode: 'or_syntax',
+        })
+      } catch (orError) {
+        const errorMessage = orError instanceof Error ? orError.message : ''
+        if (isFilterSyntaxError(errorMessage)) {
+          try {
+            response = await callGeminiMultiEntry(ai, model, question, storeName, scopeData.effective)
+            usedFilterMode = 'multi_entry'
+            await ctx.runMutation(internal.users.internalSetOrgFilterMode, {
+              organizationId: orgId,
+              geminiFilterMode: 'multi_entry',
+            })
+          } catch (fallbackError) {
+            throw new Error('I could not search the selected manuals safely.', {
+              cause: fallbackError,
+            })
+          }
+        } else {
+          throw orError
+        }
+      }
+    }
+
+    const latencyMs = Date.now() - startedAt
+    const rawCitations = normalizeMultiManualCitations(
+      response.candidates?.[0]?.groundingMetadata,
+      scopeData.effective,
+    )
+    const rawText = response.text?.trim() ?? ''
+    const refusal = shouldRefuse(rawText, rawCitations)
+    const answerText = refusal ? REFUSAL : rawText
+    const answerCitations = refusal ? [] : rawCitations
+
+    const effectiveManualIds = scopeData.effective.map((v) => v.manualId as string)
+    const effectiveManualVersionIds = scopeData.effective.map(
+      (v) => v.manualVersionId as string,
+    )
+
+    await ctx.runMutation(internal.chats.internalRecordMultiManualExchange, {
+      chatSessionId: chatSessionId!,
+      userTokenIdentifier: user.tokenIdentifier,
+      title: question,
+      question,
+      answerText,
+      refusal,
+      citations: answerCitations,
+      warning,
+      model,
+      latencyMs,
+      sourceFileName: scopeData.effective.map((v) => v.sourceFileName).join(', '),
+    })
+
+    await ctx.runMutation(internal.manuals.internalWriteAuditEvent, {
+      actorTokenIdentifier: user.tokenIdentifier,
+      action: 'manual.ask_multi_manual_question',
+      targetType: 'chatSession',
+      targetId: chatSessionId,
+      metadata: {
+        effectiveManualIds: effectiveManualIds.join(','),
+        filterMode: usedFilterMode,
+        refusal: String(refusal),
+      },
+    })
+
+    return {
+      chatSessionId: chatSessionId!,
+      answerText,
+      refusal,
+      citations: answerCitations,
+      warning,
+      effectiveManualIds,
+      effectiveManualVersionIds,
+      excludedManuals: scopeData.excluded.length > 0 ? scopeData.excluded : undefined,
+      latencyMs,
+      model,
+    }
+  },
+})
+
+async function getOrgIdForUser(ctx: ActionCtx): Promise<Id<'organizations'>> {
+  const orgId: Id<'organizations'> | null = await ctx.runQuery(
+    internal.users.internalGetDefaultOrgId,
+    {},
+  )
+  if (!orgId) {
+    throw new Error('Organization not configured.')
+  }
+  return orgId
+}
+
+type EffectiveVersion = {
+  manualId: Id<'manuals'>
+  manualVersionId: Id<'manualVersions'>
+  title: string
+  sourceFileName: string
+  geminiFileName?: string
+  geminiDocumentName?: string
+  geminiFileSearchStoreName?: string
+  providerMode: string
+}
+
+async function callGeminiOrSyntax(
+  ai: GoogleGenAI,
+  model: string,
+  question: string,
+  storeName: string,
+  versions: EffectiveVersion[],
+) {
+  const filterParts = versions.map(
+    (v) => `manualVersionId="${v.manualVersionId}"`,
+  )
+  const metadataFilter =
+    filterParts.length === 1
+      ? filterParts[0]
+      : filterParts.join(' OR ')
+
+  return await ai.models.generateContent({
+    model,
+    contents: question,
+    config: {
+      systemInstruction: MANUAL_ONLY_INSTRUCTION,
+      temperature: 0,
+      tools: [
+        {
+          fileSearch: {
+            fileSearchStoreNames: [storeName],
+            metadataFilter,
+          },
+        },
+      ],
+    },
+  })
+}
+
+async function callGeminiMultiEntry(
+  ai: GoogleGenAI,
+  model: string,
+  question: string,
+  storeName: string,
+  versions: EffectiveVersion[],
+) {
+  const tools = versions.map((v) => ({
+    fileSearch: {
+      fileSearchStoreNames: [storeName],
+      metadataFilter: `manualVersionId="${v.manualVersionId}"`,
+    },
+  }))
+
+  return await ai.models.generateContent({
+    model,
+    contents: question,
+    config: {
+      systemInstruction: MANUAL_ONLY_INSTRUCTION,
+      temperature: 0,
+      tools,
+    },
+  })
+}
+
+function buildExcludedWarning(
+  excluded: Array<{ manualId: string; title?: string; reason: string }>,
+): string {
+  const reasonLabels: Record<string, string> = {
+    archived: 'archived',
+    failed: 'unavailable',
+    unauthorized: 'access removed',
+    missing: 'not found',
+    unsupported_provider_mode: 'incompatible',
+  }
+  const details = excluded
+    .map((e) => `${e.title ?? 'Unknown'} — ${reasonLabels[e.reason] ?? e.reason}`)
+    .join('; ')
+  return `Some manuals in this chat are no longer available and were excluded. Excluded: ${details}.`
+}
+
+function isFilterSyntaxError(message: string): boolean {
+  const lower = message.toLowerCase()
+  const transientPatterns = [
+    'timeout',
+    'rate limit',
+    'quota',
+    'overloaded',
+    'unavailable',
+    'deadline exceeded',
+    'internal error',
+    'connection',
+    'network',
+    '503',
+    '429',
+    '500',
+    'unauthorized',
+    '401',
+    '403',
+  ]
+  if (transientPatterns.some((p) => lower.includes(p))) {
+    return false
+  }
+
+  return (
+    (lower.includes('metadata') && lower.includes('filter')) ||
+    (lower.includes('metadatafilter') && (lower.includes('syntax') || lower.includes('invalid') || lower.includes('unsupported'))) ||
+    (lower.includes('operator') && (lower.includes('unsupported') || lower.includes('invalid'))) ||
+    lower.includes('tool_config') ||
+    (lower.includes('tool config') && lower.includes('invalid'))
+  )
+}
+
+function normalizeMultiManualCitations(
+  groundingMetadata: unknown,
+  versions: EffectiveVersion[],
+): MultiManualQuestionResult['citations'] {
+  if (!isRecord(groundingMetadata)) return []
+  const chunks = groundingMetadata.groundingChunks
+  if (!Array.isArray(chunks)) return []
+
+  const versionLookup = new Map<string, EffectiveVersion>()
+  for (const v of versions) {
+    if (v.geminiFileName) versionLookup.set(v.geminiFileName, v)
+    if (v.geminiDocumentName) versionLookup.set(v.geminiDocumentName, v)
+    if (v.sourceFileName) versionLookup.set(v.sourceFileName, v)
+  }
+
+  return chunks
+    .map((chunk) => {
+      if (!isRecord(chunk) || !isRecord(chunk.retrievedContext)) return null
+      const rc = chunk.retrievedContext
+
+      const uri = getString(rc.uri)
+      const title = getString(rc.title)
+      const excerpt = truncate(getString(rc.text), 280)
+      const pageNumber = getNumber(rc.pageNumber)
+
+      let matched: EffectiveVersion | undefined
+      if (uri) {
+        matched = versionLookup.get(uri)
+        if (!matched) {
+          for (const [key, ver] of versionLookup) {
+            if (uri.includes(key) || key.includes(uri)) {
+              matched = ver
+              break
+            }
+          }
+        }
+      }
+      if (!matched && title) {
+        for (const ver of versions) {
+          if (ver.sourceFileName === title || ver.title === title) {
+            matched = ver
+            break
+          }
+        }
+      }
+
+      return {
+        title: matched?.title ?? title ?? 'Unknown source',
+        manualId: matched?.manualId as string | undefined,
+        manualVersionId: matched?.manualVersionId as string | undefined,
+        sourceFileName: matched?.sourceFileName,
+        excerpt,
+        pageNumber,
+        providerUri: uri,
+      }
+    })
+    .filter((c): c is NonNullable<typeof c> => c !== null)
+    .slice(0, 10)
+}
+
 async function waitForOperation(
   ai: GoogleGenAI,
   operation: UploadToFileSearchStoreOperation,

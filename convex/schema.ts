@@ -15,6 +15,10 @@ const citation = v.object({
   pageNumber: v.optional(v.number()),
   excerpt: v.optional(v.string()),
   fileSearchStore: v.optional(v.string()),
+  manualId: v.optional(v.string()),
+  manualVersionId: v.optional(v.string()),
+  sourceFileName: v.optional(v.string()),
+  providerUri: v.optional(v.string()),
 })
 
 const membershipRole = v.union(
@@ -49,6 +53,9 @@ export default defineSchema({
     name: v.string(),
     slug: v.string(),
     geminiFileSearchStoreName: v.optional(v.string()),
+    geminiFilterMode: v.optional(
+      v.union(v.literal('or_syntax'), v.literal('multi_entry')),
+    ),
     createdAt: v.number(),
     updatedAt: v.number(),
   }).index('by_slug', ['slug']),
@@ -217,6 +224,7 @@ export default defineSchema({
     content: v.string(),
     refusal: v.optional(v.boolean()),
     citations: v.optional(v.array(citation)),
+    warning: v.optional(v.string()),
     model: v.optional(v.string()),
     latencyMs: v.optional(v.number()),
     sourceFileName: v.optional(v.string()),
