@@ -65,6 +65,7 @@ export const inviteUser = action({
     const clerk = createClerkClient({ secretKey: clerkSecretKey })
 
     let clerkInvitationId: string | undefined
+    let userAlreadyExists = false
     try {
       const invitation = await clerk.invitations.createInvitation({
         emailAddress: emailNormalized,
@@ -79,8 +80,13 @@ export const inviteUser = action({
       })
       clerkInvitationId = invitation.id
     } catch (clerkError) {
-      const message = clerkError instanceof Error ? clerkError.message : 'Clerk invitation failed'
-      throw new Error(`Could not send invitation: ${message}`, { cause: clerkError })
+      const status = (clerkError as { status?: number }).status
+      if (status === 422) {
+        userAlreadyExists = true
+      } else {
+        const message = clerkError instanceof Error ? clerkError.message : 'Clerk invitation failed'
+        throw new Error(`Could not send invitation: ${message}`, { cause: clerkError })
+      }
     }
 
     const inviteId: Id<'invites'> = await ctx.runMutation(
@@ -97,7 +103,7 @@ export const inviteUser = action({
       },
     )
 
-    return { inviteId, clerkInvitationId }
+    return { inviteId, clerkInvitationId, userAlreadyExists }
   },
 })
 
