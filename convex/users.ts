@@ -1,9 +1,10 @@
 import { v } from 'convex/values'
-import { internalQuery, mutation, query } from './_generated/server'
+import { internalMutation, internalQuery, mutation, query } from './_generated/server'
 import {
   ensureUserAndMembership,
   getDefaultOrganization,
   isAdminIdentity,
+  requireManualUploadPermission,
   requireOrgAdmin,
   requireAllowedUser,
 } from './permissions'
@@ -276,9 +277,105 @@ export const internalRequireAllowedUser = internalQuery({
   },
 })
 
+export const internalRequireManualUploadPermission = internalQuery({
+  args: {
+    visibility: v.union(v.literal('org'), v.literal('department'), v.literal('restricted')),
+    departmentId: v.optional(v.id('departments')),
+  },
+  handler: async (ctx, args) => {
+    return await requireManualUploadPermission(ctx, {
+      visibility: args.visibility,
+      departmentId: args.departmentId,
+    })
+  },
+})
+
 export const internalRequireOrgAdmin = internalQuery({
   args: {},
   handler: async (ctx) => {
     return await requireOrgAdmin(ctx)
+  },
+})
+
+export const internalGetOrCreateOrgStore = internalMutation({
+  args: {
+    organizationId: v.id('organizations'),
+    geminiFileSearchStoreName: v.string(),
+  },
+  handler: async (ctx, args) => {
+    const org = await ctx.db.get(args.organizationId)
+    if (!org) throw new Error('Organization not found.')
+
+    if (org.geminiFileSearchStoreName) {
+      return org.geminiFileSearchStoreName
+    }
+
+    await ctx.db.patch(args.organizationId, {
+      geminiFileSearchStoreName: args.geminiFileSearchStoreName,
+      updatedAt: Date.now(),
+    })
+
+    return args.geminiFileSearchStoreName
+  },
+})
+
+export const internalGetOrgStoreName = internalQuery({
+  args: {
+    organizationId: v.id('organizations'),
+  },
+  handler: async (ctx, args) => {
+    const org = await ctx.db.get(args.organizationId)
+    return org?.geminiFileSearchStoreName ?? null
+  },
+})
+
+export const getCurrentUserUploadInfo = query({
+  args: {},
+  handler: async (ctx) => {
+    const identity = await requireAllowedUser(ctx)
+    const organization = await getDefaultOrganization(ctx)
+
+    if (!organization) {
+      return { canUpload: false, role: 'member' as const, departments: [] }
+    }
+
+    const orgMemberships = await ctx.db
+      .query('memberships')
+      .withIndex('by_organizationId_and_userTokenIdentifier', (q) =>
+        q
+          .eq('organizationId', organization._id)
+          .eq('userTokenIdentifier', identity.tokenIdentifier),
+      )
+      .collect()
+
+    const orgLevelMembership = orgMemberships.find(
+      (m) => m.departmentId === undefined,
+    )
+    const isOrgAdmin =
+      isAdminIdentity(identity) ||
+      (orgLevelMembership &&
+        (orgLevelMembership.role === 'owner' || orgLevelMembership.role === 'org_admin'))
+
+    const deptAdminMemberships = orgMemberships.filter(
+      (m) => m.departmentId !== undefined && m.role === 'department_admin',
+    )
+
+    const departments = []
+    for (const m of deptAdminMemberships) {
+      if (m.departmentId) {
+        const dept = await ctx.db.get(m.departmentId)
+        if (dept && dept.status !== 'archived') {
+          departments.push({ _id: dept._id, name: dept.name, slug: dept.slug })
+        }
+      }
+    }
+
+    const canUpload = Boolean(isOrgAdmin) || departments.length > 0
+
+    return {
+      canUpload,
+      role: isOrgAdmin ? ('org_admin' as const) : ('department_admin' as const),
+      departments,
+    }
   },
 })

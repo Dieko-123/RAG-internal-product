@@ -250,6 +250,96 @@ function isAllowedIdentity(identity: SafeIdentity): boolean {
   return Boolean(domain && allowedDomains.has(domain))
 }
 
+export type UploadPermissionResult = {
+  identity: SafeIdentity
+  organizationId: Id<'organizations'>
+  effectiveVisibility: 'org' | 'department'
+  effectiveDepartmentId: Id<'departments'> | undefined
+}
+
+export async function requireManualUploadPermission(
+  ctx: DbCtx,
+  opts: {
+    visibility: 'org' | 'department' | 'restricted'
+    departmentId?: Id<'departments'>
+  },
+): Promise<UploadPermissionResult> {
+  if (opts.visibility === 'restricted') {
+    throw new Error('Restricted visibility uploads are not yet supported.')
+  }
+
+  const identity = await requireAllowedUser(ctx)
+  const organization = await getDefaultOrganization(ctx)
+
+  if (!organization) {
+    throw new Error('Default organization is not configured.')
+  }
+
+  const orgMemberships = await ctx.db
+    .query('memberships')
+    .withIndex('by_organizationId_and_userTokenIdentifier', (q) =>
+      q
+        .eq('organizationId', organization._id)
+        .eq('userTokenIdentifier', identity.tokenIdentifier),
+    )
+    .collect()
+
+  const isOrgLevel = orgMemberships.some(
+    (m) =>
+      m.departmentId === undefined &&
+      (m.role === 'owner' || m.role === 'org_admin'),
+  )
+
+  if (isAdminIdentity(identity) || isOrgLevel) {
+    if (opts.visibility === 'department' && opts.departmentId) {
+      const dept = await ctx.db.get(opts.departmentId)
+      if (!dept || dept.organizationId !== organization._id) {
+        throw new Error('Department not found in this organization.')
+      }
+    }
+
+    return {
+      identity,
+      organizationId: organization._id,
+      effectiveVisibility: opts.visibility,
+      effectiveDepartmentId: opts.visibility === 'department' ? opts.departmentId : undefined,
+    }
+  }
+
+  if (opts.visibility === 'org') {
+    throw new Error('Only org admins can upload org-wide manuals.')
+  }
+
+  if (opts.visibility !== 'department' || !opts.departmentId) {
+    throw new Error('Department admins must specify a target department.')
+  }
+
+  const dept = await ctx.db.get(opts.departmentId)
+  if (!dept || dept.organizationId !== organization._id) {
+    throw new Error('Department not found in this organization.')
+  }
+
+  const deptMembership = await ctx.db
+    .query('memberships')
+    .withIndex('by_departmentId_and_userTokenIdentifier', (q) =>
+      q
+        .eq('departmentId', opts.departmentId!)
+        .eq('userTokenIdentifier', identity.tokenIdentifier),
+    )
+    .unique()
+
+  if (!deptMembership || deptMembership.role !== 'department_admin') {
+    throw new Error('You do not have upload permission for this department.')
+  }
+
+  return {
+    identity,
+    organizationId: organization._id,
+    effectiveVisibility: 'department',
+    effectiveDepartmentId: opts.departmentId,
+  }
+}
+
 function parseList(
   value: string | undefined,
   options: { lowercase?: boolean } = {},
