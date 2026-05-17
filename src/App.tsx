@@ -171,7 +171,6 @@ function SignedInShell() {
   const [view, setView] = useState<View>('chat')
   const [sidebarCollapsed, setSidebarCollapsed] = useState(false)
   const [selectedChatId, setSelectedChatId] = useState<ChatSessionId | null>(null)
-  const [selectedManualId, setSelectedManualId] = useState<ManualId | null>(null)
   const [accessState, setAccessState] = useState<
     'idle' | 'checking' | 'ready' | 'denied'
   >('idle')
@@ -241,7 +240,6 @@ function SignedInShell() {
   function openChat(session: ChatSession) {
     setView('chat')
     setSelectedChatId(session._id)
-    setSelectedManualId(session.manualId)
   }
 
   function togglePinned(session: ChatSession) {
@@ -395,8 +393,6 @@ function SignedInShell() {
           <ChatWorkspace
             selectedChatId={selectedChatId}
             onSelectChat={setSelectedChatId}
-            selectedManualId={selectedManualId}
-            onSelectManual={setSelectedManualId}
             canQuery={accessState === 'ready'}
           />
         ) : activeView === 'documents' ? (
@@ -409,22 +405,26 @@ function SignedInShell() {
   )
 }
 
+type SelectableManual = {
+  _id: ManualId
+  title: string
+  visibility: string
+  departmentName?: string
+}
+
+const MAX_SELECTED_MANUALS = 5
+
 function ChatWorkspace({
   selectedChatId,
   onSelectChat,
-  selectedManualId,
-  onSelectManual,
   canQuery,
 }: {
   selectedChatId: ChatSessionId | null
   onSelectChat: (chatSessionId: ChatSessionId | null) => void
-  selectedManualId: ManualId | null
-  onSelectManual: (manualId: ManualId | null) => void
   canQuery: boolean
 }) {
   const queryArgs = canQuery ? {} : 'skip'
-  const manuals = useQuery(api.manuals.listManuals, queryArgs)
-  const activeManual = useQuery(api.manuals.getActiveManual, queryArgs)
+  const selectableManuals = useQuery(api.manuals.listSelectableManuals, queryArgs)
   const messages = useQuery(
     api.chats.listChatMessages,
     canQuery
@@ -433,32 +433,35 @@ function ChatWorkspace({
         }
       : 'skip',
   )
-  const askManualQuestion = useAction(api.gemini.askManualQuestion)
+  const askMultiManualQuestion = useAction(api.gemini.askMultiManualQuestion)
   const [question, setQuestion] = useState('')
   const [isAsking, setIsAsking] = useState(false)
   const [pendingQuestion, setPendingQuestion] = useState<string | null>(null)
   const [error, setError] = useState<string | null>(null)
+  const [selectedManualIds, setSelectedManualIds] = useState<ManualId[]>([])
+
+  const scopeLocked = selectedChatId !== null
+  const manualsList: SelectableManual[] = selectableManuals ?? []
+  const manualsLoading = selectableManuals === undefined
   const displayedMessages = messages ?? []
-  const selectableManuals = (manuals ?? []).filter(
-    (manual) => manual.status === 'active',
-  )
-  const manualsLoading = manuals === undefined
-  const activeManualLoading = activeManual === undefined
-  const selectedManual = selectedManualId
-    ? selectableManuals.find((manual) => manual._id === selectedManualId)
-    : null
-  const selectedManualReady = selectedManualId
-    ? !manualsLoading && Boolean(selectedManual)
-    : !activeManualLoading && Boolean(activeManual)
-  const manualStatusLoading = selectedManualId
-    ? manualsLoading
-    : activeManualLoading
-  const selectedManualTitle =
-    selectedManual?.title ?? activeManual?.manual.title ?? null
+  const hasSelectedManuals = selectedManualIds.length > 0
+  const selectedManualReady = !manualsLoading && (hasSelectedManuals || scopeLocked)
+
+  function toggleManual(manualId: ManualId) {
+    if (scopeLocked) return
+    setSelectedManualIds((prev) => {
+      if (prev.includes(manualId)) {
+        return prev.filter((id) => id !== manualId)
+      }
+      if (prev.length >= MAX_SELECTED_MANUALS) return prev
+      return [...prev, manualId]
+    })
+  }
 
   async function handleAsk() {
     const trimmedQuestion = question.trim()
     if (!trimmedQuestion || isAsking) return
+    if (!selectedChatId && selectedManualIds.length === 0) return
 
     setIsAsking(true)
     setPendingQuestion(trimmedQuestion)
@@ -466,10 +469,10 @@ function ChatWorkspace({
     setError(null)
 
     try {
-      const result = await askManualQuestion({
+      const result = await askMultiManualQuestion({
         question: trimmedQuestion,
         chatSessionId: selectedChatId ?? undefined,
-        manualId: selectedManualId ?? undefined,
+        selectedManualIds: selectedChatId ? undefined : selectedManualIds,
       })
       onSelectChat(result.chatSessionId)
     } catch (err) {
@@ -481,45 +484,70 @@ function ChatWorkspace({
     }
   }
 
+  const selectedTitles = manualsList
+    .filter((m) => selectedManualIds.includes(m._id))
+    .map((m) => m.title)
+
   return (
     <section className="chat-workspace">
       <div className="page-header">
         <h1>Ask a question</h1>
         <p>
-          {selectedManualReady
-            ? `Grounded on ${selectedManualTitle}`
-            : 'Ingest or upload an active manual before asking questions'}
+          {scopeLocked
+            ? 'Scope locked for this chat.'
+            : hasSelectedManuals
+              ? `Searching: ${selectedTitles.join(', ')}`
+              : manualsLoading
+                ? 'Loading manuals...'
+                : manualsList.length > 0
+                  ? 'Select manuals to search'
+                  : 'No manuals available for search'}
         </p>
       </div>
 
       <div className="connection-status">
         <span className={selectedManualReady ? 'status-dot' : 'status-dot status-idle'} />
-        {manualStatusLoading
-          ? 'Checking manual status'
+        {manualsLoading
+          ? 'Loading manuals'
           : selectedManualReady
-            ? 'Manual active'
-            : 'No active manual'}
+            ? scopeLocked
+              ? 'Scope locked'
+              : `${selectedManualIds.length} manual${selectedManualIds.length !== 1 ? 's' : ''} selected`
+            : 'Select manuals'}
       </div>
 
-      {selectableManuals.length > 0 ? (
-        <label className="manual-picker">
-          <span>Manual</span>
-          <select
-            value={selectedManualId ?? ''}
-            onChange={(event) => {
-              const nextManualId = event.target.value as ManualId
-              onSelectManual(nextManualId || null)
-              onSelectChat(null)
-            }}
-          >
-            <option value="">Latest active manual</option>
-            {selectableManuals.map((manual) => (
-              <option value={manual._id} key={manual._id}>
-                {manual.title}
-              </option>
-            ))}
-          </select>
-        </label>
+      {!scopeLocked && manualsList.length > 0 ? (
+        <div className="manual-selector" aria-label="Select manuals to search">
+          {manualsList.map((manual) => {
+            const isChecked = selectedManualIds.includes(manual._id)
+            const isDisabled = !isChecked && selectedManualIds.length >= MAX_SELECTED_MANUALS
+            return (
+              <label
+                className={`manual-checkbox${isChecked ? ' checked' : ''}${isDisabled ? ' disabled' : ''}`}
+                key={manual._id}
+              >
+                <input
+                  type="checkbox"
+                  checked={isChecked}
+                  disabled={isDisabled}
+                  onChange={() => toggleManual(manual._id)}
+                />
+                <span className="manual-checkbox-title">{manual.title}</span>
+                <span className="manual-checkbox-meta">
+                  {manual.visibility === 'department' && manual.departmentName
+                    ? manual.departmentName
+                    : manual.visibility}
+                </span>
+              </label>
+            )
+          })}
+        </div>
+      ) : null}
+
+      {scopeLocked ? (
+        <div className="scope-locked-notice">
+          Scope locked for this chat. Start a new chat to change manuals.
+        </div>
       ) : null}
 
       <div className="chat-container">
@@ -530,7 +558,7 @@ function ChatWorkspace({
                 <circle cx="11" cy="11" r="8" />
                 <line x1="21" y1="21" x2="16.65" y2="16.65" />
               </svg>
-              Ask: What is the laptop reporting policy?
+              Select manuals and ask a question
             </div>
           ) : (
             <>
@@ -545,6 +573,9 @@ function ChatWorkspace({
                   }
                   key={message._id}
                 >
+                  {message.role === 'assistant' && message.warning ? (
+                    <div className="message-scope-warning">{message.warning}</div>
+                  ) : null}
                   <p>{message.content}</p>
                   {message.role === 'assistant' ? (
                     <>
@@ -554,15 +585,7 @@ function ChatWorkspace({
                         {message.sourceFileName ? ` / ${message.sourceFileName}` : ''}
                       </div>
                       {!message.refusal && message.citations && message.citations.length > 0 ? (
-                        <div className="citations">
-                          {message.citations.map((citation, index) => (
-                            <div className="citation" key={`${citation.uri ?? citation.title ?? index}`}>
-                              <span>{citation.title ?? 'Manual source'}</span>
-                              {citation.pageNumber ? <strong>Page {citation.pageNumber}</strong> : null}
-                              {citation.excerpt ? <p>{citation.excerpt}</p> : null}
-                            </div>
-                          ))}
-                        </div>
+                        <CitationList citations={message.citations} />
                       ) : null}
                     </>
                   ) : null}
@@ -582,11 +605,11 @@ function ChatWorkspace({
           <textarea
             aria-label="Ask a question"
             placeholder={
-              manualStatusLoading
-                ? 'Checking manual status'
+              manualsLoading
+                ? 'Loading manuals...'
                 : selectedManualReady
-                  ? 'Ask about the selected manual'
-                  : 'No active manual yet'
+                  ? 'Ask about the selected manuals'
+                  : 'Select at least one manual'
             }
             rows={1}
             value={question}
@@ -597,13 +620,13 @@ function ChatWorkspace({
                 void handleAsk()
               }
             }}
-            disabled={manualStatusLoading || !selectedManualReady || isAsking}
+            disabled={manualsLoading || !selectedManualReady || isAsking}
           />
           <button
             type="button"
             className="btn btn-primary"
             disabled={
-              manualStatusLoading ||
+              manualsLoading ||
               !selectedManualReady ||
               isAsking ||
               !question.trim()
@@ -619,6 +642,51 @@ function ChatWorkspace({
         </div>
       </div>
     </section>
+  )
+}
+
+function CitationList({
+  citations,
+}: {
+  citations: Array<{
+    title?: string
+    uri?: string
+    pageNumber?: number
+    excerpt?: string
+    manualId?: string
+    manualVersionId?: string
+    sourceFileName?: string
+  }>
+}) {
+  const grouped = useMemo(() => {
+    const groups = new Map<string, { label: string; items: typeof citations }>()
+    for (const citation of citations) {
+      const key = citation.manualVersionId ?? citation.manualId ?? citation.title ?? citation.sourceFileName ?? 'unknown'
+      const label = citation.title ?? citation.sourceFileName ?? 'Unknown source'
+      const existing = groups.get(key)
+      if (existing) {
+        existing.items.push(citation)
+      } else {
+        groups.set(key, { label, items: [citation] })
+      }
+    }
+    return groups
+  }, [citations])
+
+  return (
+    <div className="citations">
+      {[...grouped.values()].map(({ label, items }) => (
+        <div className="citation-group" key={`${label}-${items[0]?.manualVersionId ?? items[0]?.uri ?? ''}`}>
+          <div className="citation-group-title">From: {label}</div>
+          {items.map((citation, index) => (
+            <div className="citation" key={`${citation.uri ?? citation.title ?? index}`}>
+              {citation.pageNumber ? <strong>Page {citation.pageNumber}</strong> : null}
+              {citation.excerpt ? <p>{citation.excerpt}</p> : null}
+            </div>
+          ))}
+        </div>
+      ))}
+    </div>
   )
 }
 

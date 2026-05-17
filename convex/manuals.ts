@@ -95,6 +95,68 @@ export const listManuals = query({
   },
 })
 
+export const listSelectableManuals = query({
+  args: {},
+  handler: async (ctx) => {
+    const identity = await requireAllowedUser(ctx)
+    const organization = await getDefaultOrganization(ctx)
+    if (!organization) return []
+
+    const activeManuals = await ctx.db
+      .query('manuals')
+      .withIndex('by_organizationId_and_status', (q) =>
+        q.eq('organizationId', organization._id).eq('status', 'active'),
+      )
+      .take(50)
+
+    const isOrgLevel =
+      isAdminIdentity(identity) ||
+      (await isOrgAdminOrOwner(ctx, organization._id, identity.tokenIdentifier))
+
+    const userDeptIds = isOrgLevel
+      ? null
+      : await getUserAccessibleDepartmentIds(ctx, organization._id, identity.tokenIdentifier)
+
+    const results: Array<{
+      _id: Id<'manuals'>
+      title: string
+      visibility: string
+      departmentName?: string
+    }> = []
+
+    for (const manual of activeManuals) {
+      if (!manual.currentVersionId) continue
+      const version = await ctx.db.get(manual.currentVersionId)
+      if (!version || version.status !== 'active') continue
+      if ((version.providerMode ?? 'legacy_per_manual_store') !== 'shared_org_store') continue
+
+      const vis = manual.visibility ?? 'org'
+      if (vis === 'restricted') continue
+
+      if (!isOrgLevel && userDeptIds) {
+        if (vis === 'department' && manual.departmentId) {
+          if (!userDeptIds.has(manual.departmentId)) continue
+        }
+      }
+
+      let departmentName: string | undefined
+      if (vis === 'department' && manual.departmentId) {
+        const dept = await ctx.db.get(manual.departmentId)
+        departmentName = dept?.name
+      }
+
+      results.push({
+        _id: manual._id,
+        title: manual.title,
+        visibility: vis,
+        departmentName,
+      })
+    }
+
+    return results
+  },
+})
+
 export const getActiveManual = query({
   args: {},
   handler: async (ctx) => {
@@ -464,6 +526,152 @@ export const internalWriteAuditEvent = internalMutation({
   },
 })
 
+export const internalGetManualVersionsForScope = internalQuery({
+  args: {
+    manualVersionIds: v.array(v.id('manualVersions')),
+    userTokenIdentifier: v.string(),
+  },
+  handler: async (ctx, args) => {
+    const identity = await requireAllowedUser(ctx)
+    if (identity.tokenIdentifier !== args.userTokenIdentifier) {
+      throw new Error('Token mismatch')
+    }
+
+    const organization = await getDefaultOrganization(ctx)
+    if (!organization) {
+      throw new Error('Organization not configured.')
+    }
+
+    const isOrgLevel =
+      isAdminIdentity(identity) ||
+      (await isOrgAdminOrOwner(ctx, organization._id, identity.tokenIdentifier))
+
+    const userDeptIds = isOrgLevel
+      ? null
+      : await getUserAccessibleDepartmentIds(ctx, organization._id, identity.tokenIdentifier)
+
+    type EffectiveVersion = {
+      manualId: Id<'manuals'>
+      manualVersionId: Id<'manualVersions'>
+      title: string
+      sourceFileName: string
+      geminiFileName?: string
+      geminiDocumentName?: string
+      geminiFileSearchStoreName?: string
+      providerMode: string
+    }
+
+    type ExcludedManual = {
+      manualId: string
+      manualVersionId: string
+      title?: string
+      reason: 'archived' | 'failed' | 'unauthorized' | 'missing' | 'unsupported_provider_mode'
+    }
+
+    const effective: EffectiveVersion[] = []
+    const excluded: ExcludedManual[] = []
+
+    for (const versionId of args.manualVersionIds) {
+      const version = await ctx.db.get(versionId)
+      if (!version) {
+        excluded.push({ manualId: '', manualVersionId: versionId, reason: 'missing' })
+        continue
+      }
+
+      const manual = await ctx.db.get(version.manualId)
+      if (!manual) {
+        excluded.push({ manualId: version.manualId, manualVersionId: versionId, reason: 'missing' })
+        continue
+      }
+
+      if (manual.status === 'archived' || version.status === 'archived') {
+        excluded.push({
+          manualId: manual._id,
+          manualVersionId: versionId,
+          title: manual.title,
+          reason: 'archived',
+        })
+        continue
+      }
+
+      if (manual.status === 'failed' || version.status === 'failed') {
+        excluded.push({
+          manualId: manual._id,
+          manualVersionId: versionId,
+          title: manual.title,
+          reason: 'failed',
+        })
+        continue
+      }
+
+      if (manual.status !== 'active' || version.status !== 'active') {
+        excluded.push({
+          manualId: manual._id,
+          manualVersionId: versionId,
+          title: manual.title,
+          reason: 'failed',
+        })
+        continue
+      }
+
+      const vis = manual.visibility ?? 'org'
+      if (vis === 'restricted') {
+        excluded.push({
+          manualId: manual._id,
+          manualVersionId: versionId,
+          title: manual.title,
+          reason: 'unauthorized',
+        })
+        continue
+      }
+
+      const providerMode = version.providerMode ?? 'legacy_per_manual_store'
+      if (providerMode !== 'shared_org_store') {
+        excluded.push({
+          manualId: manual._id,
+          manualVersionId: versionId,
+          title: manual.title,
+          reason: 'unsupported_provider_mode',
+        })
+        continue
+      }
+
+      if (!isOrgLevel && userDeptIds) {
+        if (vis === 'department' && manual.departmentId) {
+          if (!userDeptIds.has(manual.departmentId)) {
+            excluded.push({
+              manualId: manual._id,
+              manualVersionId: versionId,
+              title: manual.title,
+              reason: 'unauthorized',
+            })
+            continue
+          }
+        }
+      }
+
+      effective.push({
+        manualId: manual._id,
+        manualVersionId: version._id,
+        title: manual.title,
+        sourceFileName: version.sourceFileName,
+        geminiFileName: version.geminiFileName,
+        geminiDocumentName:
+          version.geminiDocumentName ?? version.geminiFileSearchDocumentName,
+        geminiFileSearchStoreName: version.geminiFileSearchStoreName,
+        providerMode,
+      })
+    }
+
+    return {
+      effective,
+      excluded,
+      organizationId: organization._id,
+      orgStoreName: organization.geminiFileSearchStoreName,
+    }
+  },
+})
+
 async function getActiveManualRecord(ctx: QueryCtx) {
   const organization = await getDefaultOrganization(ctx)
   const manual = await ctx.db
@@ -538,6 +746,29 @@ async function getUserDepartmentAdminIds(
   const deptIds = new Set<string>()
   for (const m of memberships) {
     if (m.departmentId && m.role === 'department_admin') {
+      deptIds.add(m.departmentId)
+    }
+  }
+  return deptIds
+}
+
+async function getUserAccessibleDepartmentIds(
+  ctx: QueryCtx,
+  organizationId: Id<'organizations'>,
+  tokenIdentifier: string,
+): Promise<Set<string>> {
+  const memberships = await ctx.db
+    .query('memberships')
+    .withIndex('by_organizationId_and_userTokenIdentifier', (q) =>
+      q
+        .eq('organizationId', organizationId)
+        .eq('userTokenIdentifier', tokenIdentifier),
+    )
+    .collect()
+
+  const deptIds = new Set<string>()
+  for (const m of memberships) {
+    if (m.departmentId) {
       deptIds.add(m.departmentId)
     }
   }

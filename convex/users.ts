@@ -277,6 +277,14 @@ export const internalRequireAllowedUser = internalQuery({
   },
 })
 
+export const internalGetDefaultOrgId = internalQuery({
+  args: {},
+  handler: async (ctx) => {
+    const org = await getDefaultOrganization(ctx)
+    return org?._id ?? null
+  },
+})
+
 export const internalRequireManualUploadPermission = internalQuery({
   args: {
     visibility: v.union(v.literal('org'), v.literal('department'), v.literal('restricted')),
@@ -326,6 +334,32 @@ export const internalGetOrgStoreName = internalQuery({
   handler: async (ctx, args) => {
     const org = await ctx.db.get(args.organizationId)
     return org?.geminiFileSearchStoreName ?? null
+  },
+})
+
+export const internalGetOrgFilterMode = internalQuery({
+  args: {
+    organizationId: v.id('organizations'),
+  },
+  handler: async (ctx, args) => {
+    const org = await ctx.db.get(args.organizationId)
+    return org?.geminiFilterMode ?? null
+  },
+})
+
+export const internalSetOrgFilterMode = internalMutation({
+  args: {
+    organizationId: v.id('organizations'),
+    geminiFilterMode: v.union(v.literal('or_syntax'), v.literal('multi_entry')),
+  },
+  handler: async (ctx, args) => {
+    const org = await ctx.db.get(args.organizationId)
+    if (!org) throw new Error('Organization not found.')
+
+    await ctx.db.patch(args.organizationId, {
+      geminiFilterMode: args.geminiFilterMode,
+      updatedAt: Date.now(),
+    })
   },
 })
 
