@@ -36,6 +36,14 @@ const providerMode = v.union(
   v.literal('shared_org_store'),
 )
 
+const ingestionJobStatus = v.union(
+  v.literal('queued'),
+  v.literal('uploading'),
+  v.literal('indexing'),
+  v.literal('active'),
+  v.literal('failed'),
+)
+
 export default defineSchema({
   organizations: defineTable({
     name: v.string(),
@@ -114,7 +122,7 @@ export default defineSchema({
     sourceFileName: v.string(),
     provider: v.literal('gemini_file_search'),
     providerMode: v.optional(providerMode),
-    geminiFileSearchStoreName: v.string(),
+    geminiFileSearchStoreName: v.optional(v.string()),
     geminiDocumentName: v.optional(v.string()),
     geminiFileSearchDocumentName: v.optional(v.string()),
     geminiFileName: v.optional(v.string()),
@@ -132,6 +140,30 @@ export default defineSchema({
     .index('by_organizationId', ['organizationId'])
     .index('by_departmentId', ['departmentId'])
     .index('by_providerMode', ['providerMode']),
+
+  ingestionJobs: defineTable({
+    manualId: v.id('manuals'),
+    manualVersionId: v.id('manualVersions'),
+    organizationId: v.id('organizations'),
+    storageId: v.optional(v.id('_storage')),
+    status: ingestionJobStatus,
+    attempts: v.number(),
+    maxAttempts: v.number(),
+    nextPollAt: v.optional(v.number()),
+    geminiOperationName: v.optional(v.string()),
+    geminiFileSearchStoreName: v.optional(v.string()),
+    geminiDocumentName: v.optional(v.string()),
+    geminiFileName: v.optional(v.string()),
+    lastError: v.optional(v.string()),
+    storageDeletedAt: v.optional(v.number()),
+    createdByTokenIdentifier: v.string(),
+    createdAt: v.number(),
+    updatedAt: v.number(),
+  })
+    .index('by_status', ['status'])
+    .index('by_manualVersionId', ['manualVersionId'])
+    .index('by_manualId', ['manualId'])
+    .index('by_organizationId', ['organizationId']),
 
   questions: defineTable({
     manualId: v.id('manuals'),

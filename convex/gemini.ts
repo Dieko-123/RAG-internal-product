@@ -4,7 +4,7 @@ import { GoogleGenAI, type UploadToFileSearchStoreOperation } from '@google/gena
 import { v } from 'convex/values'
 import { internal } from './_generated/api'
 import type { Id } from './_generated/dataModel'
-import { action } from './_generated/server'
+import { action, internalAction } from './_generated/server'
 import type { ActionCtx } from './_generated/server'
 import {
   DUMMY_MANUAL_CONTENT,
@@ -16,8 +16,10 @@ import { requireAdmin } from './permissions'
 
 const DEFAULT_MODEL = 'gemini-2.5-flash-lite'
 const REFUSAL = 'I could not find this in the manual.'
-const INDEXING_POLL_INTERVAL_MS = 5000
-const INDEXING_MAX_ATTEMPTS = 96
+const INDEXING_POLL_INTERVAL_MS = Number(process.env.INGESTION_POLL_INTERVAL_MS) || 5000
+const INDEXING_MAX_ATTEMPTS = Number(process.env.INGESTION_MAX_POLL_ATTEMPTS) || 240
+const UPLOAD_JOB_MAX_ATTEMPTS = Number(process.env.INGESTION_MAX_POLL_ATTEMPTS) || 240
+const STUCK_UPLOADING_TIMEOUT_MS = 5 * 60 * 1000
 const MANUAL_ONLY_INSTRUCTION =
   'You are a manual-based internal assistant. Answer only from the attached manual/File Search results. Do not use outside knowledge. If the manual does not clearly contain the answer, say exactly: I could not find this in the manual. Every factual answer should cite the relevant source when citation metadata is available.'
 
@@ -38,7 +40,7 @@ type ActiveManual = {
   version: {
     _id: Id<'manualVersions'>
     sourceFileName: string
-    geminiFileSearchStoreName: string
+    geminiFileSearchStoreName?: string
   }
 } | null
 
@@ -51,9 +53,20 @@ type IngestDummyManualResult = {
   geminiFileName?: string
 }
 
-type IngestUploadedManualResult = IngestDummyManualResult & {
+type IngestUploadedManualResult = {
+  manualId: Id<'manuals'>
+  manualVersionId: Id<'manualVersions'>
+  ingestionJobId: Id<'ingestionJobs'>
+  status: 'queued'
   title: string
   sourceFileName: string
+}
+
+type RetryIndexingResult = {
+  ingestionJobId: Id<'ingestionJobs'>
+  manualId: Id<'manuals'>
+  manualVersionId: Id<'manualVersions'>
+  status: 'indexing'
 }
 
 type AskManualQuestionResult = {
@@ -148,6 +161,10 @@ export const ingestDummyManual = action({
         },
       })
 
+      if (!manualVersionId) {
+        throw new Error('Manual version was not created.')
+      }
+
       return {
         manualId,
         manualVersionId,
@@ -188,12 +205,16 @@ export const ingestUploadedManual = action({
     sourceFileName: v.string(),
     mimeType: v.string(),
     sizeBytes: v.number(),
+    visibility: v.optional(v.union(v.literal('org'), v.literal('department'), v.literal('restricted'))),
+    departmentId: v.optional(v.id('departments')),
   },
   handler: async (ctx, args): Promise<IngestUploadedManualResult> => {
-    const admin = await requireAdmin(ctx)
+    const visibility = args.visibility ?? 'org'
+    const permission = await ctx.runQuery(
+      internal.users.internalRequireManualUploadPermission,
+      { visibility, departmentId: args.departmentId },
+    )
     const fileInfo = validateManualUpload(args)
-    const apiKey = readRequiredEnv('GEMINI_API_KEY')
-    const ai = new GoogleGenAI({ apiKey })
     const slug = slugify(fileInfo.title)
 
     const manualId: Id<'manuals'> = await ctx.runMutation(
@@ -201,122 +222,386 @@ export const ingestUploadedManual = action({
       {
         title: fileInfo.title,
         slug,
-        actorTokenIdentifier: admin.tokenIdentifier,
+        actorTokenIdentifier: permission.identity.tokenIdentifier,
+        visibility: permission.effectiveVisibility,
+        departmentId: permission.effectiveDepartmentId,
+      },
+    )
+    const versionLabel = `upload-${Date.now()}`
+    const manualVersionId: Id<'manualVersions'> = await ctx.runMutation(
+      internal.manuals.internalCreateManualVersion,
+      {
+        manualId,
+        versionLabel,
+        sourceFileName: fileInfo.sourceFileName,
+        provider: 'gemini_file_search',
+        mimeType: fileInfo.mimeType,
+        sizeBytes: fileInfo.sizeBytes,
+        status: 'indexing',
+        actorTokenIdentifier: permission.identity.tokenIdentifier,
+        visibility: permission.effectiveVisibility,
+        departmentId: permission.effectiveDepartmentId,
+        providerMode: 'shared_org_store',
+      },
+    )
+    const ingestionJobId: Id<'ingestionJobs'> = await ctx.runMutation(
+      internal.ingestionJobs.internalCreateQueuedJob,
+      {
+        manualId,
+        manualVersionId,
+        organizationId: permission.organizationId,
+        storageId: args.storageId,
+        maxAttempts: UPLOAD_JOB_MAX_ATTEMPTS,
+        actorTokenIdentifier: permission.identity.tokenIdentifier,
       },
     )
 
-    let manualVersionId: Id<'manualVersions'> | null = null
+    await ctx.scheduler.runAfter(0, internal.gemini.internalRunIngestionJob, {
+      ingestionJobId,
+    })
+
+    return {
+      manualId,
+      manualVersionId,
+      ingestionJobId,
+      status: 'queued',
+      title: fileInfo.title,
+      sourceFileName: fileInfo.sourceFileName,
+    }
+  },
+})
+
+export const retryIndexing = action({
+  args: {
+    ingestionJobId: v.id('ingestionJobs'),
+  },
+  handler: async (ctx, args): Promise<RetryIndexingResult> => {
+    const admin = await ctx.runQuery(internal.users.internalRequireOrgAdmin, {})
+    const job = await ctx.runMutation(
+      internal.ingestionJobs.internalPrepareRetry,
+      {
+        ingestionJobId: args.ingestionJobId,
+        organizationId: admin.organizationId,
+      },
+    )
+
+    await ctx.scheduler.runAfter(0, internal.gemini.internalPollIngestionJob, {
+      ingestionJobId: args.ingestionJobId,
+    })
+
+    return {
+      ingestionJobId: args.ingestionJobId,
+      manualId: job.manualId,
+      manualVersionId: job.manualVersionId,
+      status: 'indexing' as const,
+    }
+  },
+})
+
+export const internalRunIngestionJob = internalAction({
+  args: {
+    ingestionJobId: v.id('ingestionJobs'),
+  },
+  handler: async (ctx, args) => {
+    const loaded = await ctx.runQuery(internal.ingestionJobs.internalGetJob, {
+      ingestionJobId: args.ingestionJobId,
+    })
+
+    if (!loaded?.job || !loaded.manual || !loaded.manualVersion) {
+      throw new Error('Ingestion job not found.')
+    }
+
+    const { job, manual, manualVersion } = loaded
+
+    if (job.status !== 'queued') {
+      return
+    }
 
     try {
-      const fileBlob = await ctx.storage.get(args.storageId)
+      await ctx.runMutation(internal.ingestionJobs.internalMarkUploading, {
+        ingestionJobId: job._id,
+      })
+
+      if (!job.storageId) {
+        throw new Error('Re-upload required.')
+      }
+
+      const fileBlob = await ctx.storage.get(job.storageId)
 
       if (!fileBlob) {
-        throw new Error('Uploaded manual file was not found in Convex storage.')
+        throw new Error('Uploaded manual file was not found in Convex storage. Re-upload required.')
       }
 
-      const fileSearchStore = await ai.fileSearchStores.create({
-        config: {
-          displayName: `${fileInfo.title} ${Date.now()}`,
-        },
-      })
+      const apiKey = readRequiredEnv('GEMINI_API_KEY')
+      const ai = new GoogleGenAI({ apiKey })
 
-      if (!fileSearchStore.name) {
-        throw new Error('Gemini did not return a File Search store name.')
+      const isSharedStore = manualVersion.providerMode === 'shared_org_store'
+      let storeName: string
+
+      if (isSharedStore) {
+        const existingStoreName: string | null = await ctx.runQuery(
+          internal.users.internalGetOrgStoreName,
+          { organizationId: job.organizationId },
+        )
+
+        if (existingStoreName) {
+          storeName = existingStoreName
+        } else {
+          const newStore = await ai.fileSearchStores.create({
+            config: {
+              displayName: `org-store-${job.organizationId}`,
+            },
+          })
+          if (!newStore.name) {
+            throw new Error('Gemini did not return a File Search store name.')
+          }
+          storeName = await ctx.runMutation(
+            internal.users.internalGetOrCreateOrgStore,
+            {
+              organizationId: job.organizationId,
+              geminiFileSearchStoreName: newStore.name,
+            },
+          )
+        }
+      } else {
+        const fileSearchStore = await ai.fileSearchStores.create({
+          config: {
+            displayName: `${manual.title} ${Date.now()}`,
+          },
+        })
+        if (!fileSearchStore.name) {
+          throw new Error('Gemini did not return a File Search store name.')
+        }
+        storeName = fileSearchStore.name
       }
 
-      const versionLabel = `upload-${Date.now()}`
+      const customMetadata = isSharedStore
+        ? [
+            { key: 'organizationId', stringValue: job.organizationId },
+            { key: 'visibility', stringValue: manualVersion.visibility ?? 'org' },
+            {
+              key: 'departmentId',
+              stringValue:
+                manualVersion.visibility === 'department' && manualVersion.departmentId
+                  ? manualVersion.departmentId
+                  : 'org',
+            },
+            { key: 'manualId', stringValue: manual._id },
+            { key: 'manualVersionId', stringValue: manualVersion._id },
+            { key: 'status', stringValue: 'active' },
+          ]
+        : [
+            { key: 'manual_slug', stringValue: manual.slug },
+            { key: 'manual_version', stringValue: manualVersion.versionLabel },
+            { key: 'source_file_name', stringValue: manualVersion.sourceFileName },
+          ]
 
-      manualVersionId = await ctx.runMutation(
-        internal.manuals.internalCreateManualVersion,
-        {
-          manualId,
-          versionLabel,
-          sourceFileName: fileInfo.sourceFileName,
-          provider: 'gemini_file_search',
-          geminiFileSearchStoreName: fileSearchStore.name,
-          mimeType: fileInfo.mimeType,
-          sizeBytes: fileInfo.sizeBytes,
-          status: 'indexing',
-          actorTokenIdentifier: admin.tokenIdentifier,
-        },
-      )
-
-      let operation = await ai.fileSearchStores.uploadToFileSearchStore({
-        fileSearchStoreName: fileSearchStore.name,
+      const operation = await ai.fileSearchStores.uploadToFileSearchStore({
+        fileSearchStoreName: storeName,
         file: fileBlob,
         config: {
-          displayName: fileInfo.sourceFileName,
-          mimeType: fileInfo.mimeType,
-          customMetadata: [
-            { key: 'manual_slug', stringValue: slug },
-            { key: 'manual_version', stringValue: versionLabel },
-            { key: 'source_file_name', stringValue: fileInfo.sourceFileName },
-          ],
+          displayName: manualVersion.sourceFileName,
+          mimeType: manualVersion.mimeType,
+          customMetadata,
         },
       })
-
-      operation = await waitForOperation(ai, operation)
-
       const documentName = extractStringField(operation.response, 'documentName')
       const fileName = extractStringField(operation.response, 'fileName')
+      const nextPollAt = Date.now() + INDEXING_POLL_INTERVAL_MS
 
-      await ctx.runMutation(internal.manuals.internalMarkManualVersionActive, {
-        manualId,
-        manualVersionId,
-        geminiFileSearchDocumentName: documentName,
+      await ctx.runMutation(internal.ingestionJobs.internalMarkIndexing, {
+        ingestionJobId: job._id,
+        manualVersionId: manualVersion._id,
+        geminiOperationName: operation.name,
+        geminiFileSearchStoreName: storeName,
+        geminiDocumentName: documentName,
         geminiFileName: fileName,
+        nextPollAt,
       })
 
-      await ctx.runMutation(internal.manuals.internalWriteAuditEvent, {
-        actorTokenIdentifier: admin.tokenIdentifier,
-        action: 'manual.ingest_upload',
-        targetType: 'manual',
-        targetId: manualId,
-        metadata: {
-          manualVersionId,
-          geminiFileSearchStoreName: fileSearchStore.name,
-          geminiFileSearchDocumentName: documentName ?? '',
-          geminiFileName: fileName ?? '',
-          sourceFileName: fileInfo.sourceFileName,
-          mimeType: fileInfo.mimeType,
-          sizeBytes: String(fileInfo.sizeBytes),
-        },
-      })
+      await deleteTemporaryUpload(ctx, job.storageId, job._id)
 
-      return {
-        manualId,
-        manualVersionId,
-        status: 'active',
-        geminiFileSearchStoreName: fileSearchStore.name,
-        geminiFileSearchDocumentName: documentName,
-        geminiFileName: fileName,
-        title: fileInfo.title,
-        sourceFileName: fileInfo.sourceFileName,
-      }
+      await ctx.scheduler.runAfter(
+        operation.done ? 0 : INDEXING_POLL_INTERVAL_MS,
+        internal.gemini.internalPollIngestionJob,
+        { ingestionJobId: job._id },
+      )
     } catch (error) {
-      const message = error instanceof Error ? error.message : 'Unknown upload ingestion error'
+      const message =
+        error instanceof Error ? error.message : 'Unknown upload ingestion error'
 
-      await ctx.runMutation(internal.manuals.internalMarkManualVersionFailed, {
-        manualId,
-        manualVersionId: manualVersionId ?? undefined,
+      if (job.storageId) {
+        await deleteTemporaryUpload(ctx, job.storageId, job._id)
+      }
+
+      await ctx.runMutation(internal.ingestionJobs.internalMarkFailed, {
+        ingestionJobId: job._id,
+        manualId: job.manualId,
+        manualVersionId: job.manualVersionId,
         errorMessage: message,
+        actorTokenIdentifier: job.createdByTokenIdentifier,
       })
+    }
+  },
+})
 
-      await ctx.runMutation(internal.manuals.internalWriteAuditEvent, {
-        actorTokenIdentifier: admin.tokenIdentifier,
-        action: 'manual.ingest_upload_failed',
-        targetType: 'manual',
-        targetId: manualId,
-        metadata: {
-          manualVersionId: manualVersionId ?? '',
-          sourceFileName: fileInfo.sourceFileName,
-          errorMessage: message,
-        },
+export const internalPollIngestionJob = internalAction({
+  args: {
+    ingestionJobId: v.id('ingestionJobs'),
+  },
+  handler: async (ctx, args) => {
+    const loaded = await ctx.runQuery(internal.ingestionJobs.internalGetJob, {
+      ingestionJobId: args.ingestionJobId,
+    })
+
+    if (!loaded?.job || !loaded.manualVersion) {
+      throw new Error('Ingestion job not found.')
+    }
+
+    const { job, manualVersion } = loaded
+
+    if (job.status !== 'indexing') {
+      return
+    }
+
+    if (job.attempts >= job.maxAttempts) {
+      await ctx.runMutation(internal.ingestionJobs.internalMarkFailed, {
+        ingestionJobId: job._id,
+        manualId: job.manualId,
+        manualVersionId: job.manualVersionId,
+        errorMessage: 'Gemini indexing did not complete within the retry limit.',
+        actorTokenIdentifier: job.createdByTokenIdentifier,
       })
+      return
+    }
 
-      throw error
-    } finally {
-      await deleteTemporaryUpload(ctx, args.storageId)
+    if (!job.geminiOperationName) {
+      if (job.geminiDocumentName || manualVersion.geminiDocumentName) {
+        await ctx.runMutation(internal.ingestionJobs.internalMarkActive, {
+          ingestionJobId: job._id,
+          manualId: job.manualId,
+          manualVersionId: job.manualVersionId,
+          geminiDocumentName: job.geminiDocumentName ?? manualVersion.geminiDocumentName,
+          geminiFileName: job.geminiFileName ?? manualVersion.geminiFileName,
+          actorTokenIdentifier: job.createdByTokenIdentifier,
+        })
+        return
+      }
+
+      await ctx.runMutation(internal.ingestionJobs.internalMarkFailed, {
+        ingestionJobId: job._id,
+        manualId: job.manualId,
+        manualVersionId: job.manualVersionId,
+        errorMessage: 'Re-upload required.',
+        actorTokenIdentifier: job.createdByTokenIdentifier,
+      })
+      return
+    }
+
+    try {
+      const apiKey = readRequiredEnv('GEMINI_API_KEY')
+      const ai = new GoogleGenAI({ apiKey })
+      const operation = (await ai.operations.get({
+        // The installed @google/genai SDK types accept an Operation object; name
+        // is the serializable field required to resume polling in a later action.
+        operation: { name: job.geminiOperationName } as UploadToFileSearchStoreOperation,
+      })) as unknown as UploadToFileSearchStoreOperation
+
+      if (operation.error) {
+        throw new Error(`Gemini File Search indexing failed: ${JSON.stringify(operation.error)}`)
+      }
+
+      if (operation.done) {
+        await ctx.runMutation(internal.ingestionJobs.internalMarkActive, {
+          ingestionJobId: job._id,
+          manualId: job.manualId,
+          manualVersionId: job.manualVersionId,
+          geminiDocumentName:
+            extractStringField(operation.response, 'documentName') ??
+            job.geminiDocumentName ??
+            manualVersion.geminiDocumentName,
+          geminiFileName:
+            extractStringField(operation.response, 'fileName') ??
+            job.geminiFileName ??
+            manualVersion.geminiFileName,
+          actorTokenIdentifier: job.createdByTokenIdentifier,
+        })
+        return
+      }
+
+      const nextPollAt = Date.now() + INDEXING_POLL_INTERVAL_MS
+      await ctx.runMutation(internal.ingestionJobs.internalScheduleNextPoll, {
+        ingestionJobId: job._id,
+        attempts: job.attempts + 1,
+        nextPollAt,
+      })
+      await ctx.scheduler.runAfter(
+        INDEXING_POLL_INTERVAL_MS,
+        internal.gemini.internalPollIngestionJob,
+        { ingestionJobId: job._id },
+      )
+    } catch (error) {
+      const message =
+        error instanceof Error ? error.message : 'Unknown indexing poll error'
+
+      await ctx.runMutation(internal.ingestionJobs.internalMarkFailed, {
+        ingestionJobId: job._id,
+        manualId: job.manualId,
+        manualVersionId: job.manualVersionId,
+        errorMessage: message,
+        actorTokenIdentifier: job.createdByTokenIdentifier,
+      })
+    }
+  },
+})
+
+export const internalRecoverStuckJobs = internalAction({
+  args: {},
+  handler: async (ctx) => {
+    const stuckJobs: Array<{
+      _id: Id<'ingestionJobs'>
+      manualId: Id<'manuals'>
+      manualVersionId: Id<'manualVersions'>
+      createdByTokenIdentifier: string
+      geminiOperationName?: string
+      geminiDocumentName?: string
+      geminiFileName?: string
+      geminiFileSearchStoreName?: string
+      nextPollAt?: number
+    }> = await ctx.runQuery(
+      internal.ingestionJobs.internalGetStuckUploadingJobs,
+      { olderThanMs: STUCK_UPLOADING_TIMEOUT_MS },
+    )
+
+    for (const job of stuckJobs) {
+      const hasProviderIds = Boolean(
+        job.geminiOperationName || job.geminiDocumentName || job.geminiFileName,
+      )
+
+      if (hasProviderIds) {
+        await ctx.runMutation(internal.ingestionJobs.internalMarkIndexing, {
+          ingestionJobId: job._id,
+          manualVersionId: job.manualVersionId,
+          geminiOperationName: job.geminiOperationName,
+          geminiFileSearchStoreName: job.geminiFileSearchStoreName ?? '',
+          geminiDocumentName: job.geminiDocumentName,
+          geminiFileName: job.geminiFileName,
+          nextPollAt: Date.now() + INDEXING_POLL_INTERVAL_MS,
+        })
+        await ctx.scheduler.runAfter(
+          0,
+          internal.gemini.internalPollIngestionJob,
+          { ingestionJobId: job._id },
+        )
+      } else {
+        await ctx.runMutation(internal.ingestionJobs.internalMarkFailed, {
+          ingestionJobId: job._id,
+          manualId: job.manualId,
+          manualVersionId: job.manualVersionId,
+          errorMessage: 'Upload did not complete. Re-upload required.',
+          actorTokenIdentifier: job.createdByTokenIdentifier,
+        })
+      }
     }
   },
 })
@@ -342,6 +627,10 @@ export const askManualQuestion = action({
 
     if (!activeManual) {
       throw new Error('No active manual is available yet.')
+    }
+
+    if (!activeManual.version.geminiFileSearchStoreName) {
+      throw new Error('The selected manual is not ready for questions yet.')
     }
 
     const model = process.env.GEMINI_DEFAULT_MODEL?.trim() || DEFAULT_MODEL
@@ -583,9 +872,15 @@ function slugify(value: string): string {
 async function deleteTemporaryUpload(
   ctx: ActionCtx,
   storageId: Id<'_storage'>,
+  ingestionJobId?: Id<'ingestionJobs'>,
 ) {
   try {
     await ctx.storage.delete(storageId)
+    if (ingestionJobId) {
+      await ctx.runMutation(internal.ingestionJobs.internalMarkStorageDeleted, {
+        ingestionJobId,
+      })
+    }
   } catch (error) {
     console.warn(
       `Unable to delete temporary uploaded manual ${storageId}: ${
