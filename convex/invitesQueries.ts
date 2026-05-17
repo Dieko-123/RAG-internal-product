@@ -22,7 +22,10 @@ export const listInvites = query({
     if (isOrgLevel) {
       return await ctx.db
         .query('invites')
-        .withIndex('by_organizationId', (q) => q.eq('organizationId', organization._id))
+        .withIndex('by_organizationId_and_status', (q) =>
+          q.eq('organizationId', organization._id).eq('status', 'pending'),
+        )
+        .order('desc')
         .take(100)
     }
 
@@ -31,7 +34,10 @@ export const listInvites = query({
 
     const allInvites = await ctx.db
       .query('invites')
-      .withIndex('by_organizationId', (q) => q.eq('organizationId', organization._id))
+      .withIndex('by_organizationId_and_status', (q) =>
+        q.eq('organizationId', organization._id).eq('status', 'pending'),
+      )
+      .order('desc')
       .take(100)
 
     return allInvites.filter(

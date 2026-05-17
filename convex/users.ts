@@ -83,10 +83,7 @@ export const ensureCurrentUserAccess = mutation({
             acceptedAt: now,
           })
 
-          if (
-            pendingInvite.role === 'org_admin' &&
-            result.role !== 'org_admin'
-          ) {
+          if (pendingInvite.role !== result.role) {
             const orgMembership = await ctx.db
               .query('memberships')
               .withIndex('by_organizationId_and_userTokenIdentifier', (q) =>
@@ -97,9 +94,9 @@ export const ensureCurrentUserAccess = mutation({
               .filter((q) => q.eq(q.field('departmentId'), undefined))
               .unique()
 
-            if (orgMembership) {
+            if (orgMembership && orgMembership.role !== 'owner') {
               await ctx.db.patch(orgMembership._id, {
-                role: 'org_admin',
+                role: pendingInvite.role,
                 updatedAt: now,
               })
             }

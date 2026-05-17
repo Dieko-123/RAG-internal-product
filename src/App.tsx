@@ -426,7 +426,7 @@ function SignedInShell() {
         ) : activeView === 'documents' ? (
           <DocumentsWorkspace canQuery={accessState === 'ready'} />
         ) : (
-          <AdminWorkspace canQuery={accessState === 'ready'} isOrgAdmin={!!isAdmin} uploadInfo={uploadInfo} />
+          <AdminWorkspace canQuery={accessState === 'ready'} isOrgAdmin={!!isAdmin || uploadInfo?.role === 'org_admin'} uploadInfo={uploadInfo} />
         )}
       </div>
     </section>
