@@ -1022,6 +1022,11 @@
   border-color: var(--accent);
 }
 
+.manual-search-row {
+  padding: 10px 16px;
+  min-height: auto;
+}
+
 /* Responsive */
 @media (max-width: 860px) {
   .sidebar {
