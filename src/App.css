@@ -352,6 +352,36 @@
   color: var(--accent);
 }
 
+.delete-button {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 28px;
+  height: 28px;
+  border: none;
+  border-radius: 6px;
+  background: transparent;
+  color: var(--muted);
+  cursor: pointer;
+  opacity: 0;
+  transition: opacity 0.12s, background 0.12s, color 0.12s;
+}
+
+.delete-button svg {
+  width: 15px;
+  height: 15px;
+}
+
+.history-item:hover .delete-button,
+.history-item.active .delete-button {
+  opacity: 1;
+}
+
+.delete-button:hover {
+  background: #fee2e2;
+  color: #dc2626;
+}
+
 .history-item.active {
   background: var(--accent-subtle);
   color: var(--accent);

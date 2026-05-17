@@ -130,6 +130,28 @@ export const setChatPinned = mutation({
   },
 })
 
+export const deleteChat = mutation({
+  args: {
+    chatSessionId: v.id('chatSessions'),
+  },
+  handler: async (ctx, args) => {
+    const user = await requireAllowedUser(ctx)
+    const session = await ctx.db.get(args.chatSessionId)
+
+    if (!session || session.userTokenIdentifier !== user.tokenIdentifier) {
+      throw new Error('Chat not found')
+    }
+
+    const messages = await ctx.db
+      .query('chatMessages')
+      .withIndex('by_chatSessionId', (q) => q.eq('chatSessionId', args.chatSessionId))
+      .collect()
+
+    await Promise.all(messages.map((m) => ctx.db.delete(m._id)))
+    await ctx.db.delete(args.chatSessionId)
+  },
+})
+
 export const internalRecordChatExchange = internalMutation({
   args: {
     chatSessionId: v.optional(v.id('chatSessions')),

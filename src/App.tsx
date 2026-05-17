@@ -213,6 +213,7 @@ function SignedInShell() {
   const chatSessions = useQuery(api.chats.listChatSessions, protectedQueryArgs)
   const ensureCurrentUserAccess = useMutation(api.users.ensureCurrentUserAccess)
   const setChatPinned = useMutation(api.chats.setChatPinned)
+  const deleteChatMutation = useMutation(api.chats.deleteChat)
   const displayName = useMemo(() => {
     if (clerkUser) {
       return clerkUser.fullName ?? clerkUser.primaryEmailAddress?.emailAddress ?? 'User'
@@ -278,6 +279,13 @@ function SignedInShell() {
       chatSessionId: session._id,
       pinned: !session.pinned,
     })
+  }
+
+  function deleteChat(session: ChatSession) {
+    void deleteChatMutation({ chatSessionId: session._id })
+    if (selectedChatId === session._id) {
+      setSelectedChatId(null)
+    }
   }
 
   if (isAuthLoading || (isAuthenticated && currentUser === undefined)) {
@@ -407,6 +415,7 @@ function SignedInShell() {
                     selectedChatId={selectedChatId}
                     onOpenChat={openChat}
                     onTogglePinned={togglePinned}
+                    onDeleteChat={deleteChat}
                   />
                   <ChatSessionGroup
                     label="Recent"
@@ -414,6 +423,7 @@ function SignedInShell() {
                     selectedChatId={selectedChatId}
                     onOpenChat={openChat}
                     onTogglePinned={togglePinned}
+                    onDeleteChat={deleteChat}
                   />
                 </>
               )}
@@ -1641,12 +1651,14 @@ function ChatSessionGroup({
   selectedChatId,
   onOpenChat,
   onTogglePinned,
+  onDeleteChat,
 }: {
   label: string
   sessions: ChatSession[]
   selectedChatId: ChatSessionId | null
   onOpenChat: (session: ChatSession) => void
   onTogglePinned: (session: ChatSession) => void
+  onDeleteChat: (session: ChatSession) => void
 }) {
   if (sessions.length === 0) return null
 
@@ -1683,6 +1695,24 @@ function ChatSessionGroup({
             <svg viewBox="0 0 24 24" fill={session.pinned ? 'currentColor' : 'none'} stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round">
               <path d="M12 17v5" />
               <path d="M8 3h8l-1 8 4 4v2H5v-2l4-4z" />
+            </svg>
+          </button>
+          <button
+            type="button"
+            className="delete-button"
+            aria-label="Delete chat"
+            title="Delete chat"
+            onClick={(event) => {
+              event.stopPropagation()
+              onDeleteChat(session)
+            }}
+          >
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round">
+              <polyline points="3 6 5 6 21 6" />
+              <path d="M19 6l-1 14H6L5 6" />
+              <path d="M10 11v6" />
+              <path d="M14 11v6" />
+              <path d="M9 6V4h6v2" />
             </svg>
           </button>
         </div>
