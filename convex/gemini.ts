@@ -373,7 +373,7 @@ export const askManualQuestion = action({
       response.candidates?.[0]?.groundingMetadata,
     )
     const rawText = response.text?.trim() ?? ''
-    const refusal = shouldRefuse(rawText)
+    const refusal = shouldRefuse(rawText, citations)
     const answerText = refusal ? REFUSAL : rawText
     const answerCitations = refusal ? [] : citations
 
@@ -488,11 +488,14 @@ function normalizeCitations(groundingMetadata: unknown): Citation[] {
     .slice(0, 5)
 }
 
-function shouldRefuse(answerText: string): boolean {
+function shouldRefuse(answerText: string, citations: Citation[]): boolean {
   const normalized = answerText.trim()
   if (!normalized) return true
   if (normalized === REFUSAL) return true
-  return /\b(could not|cannot|can't|not able to)\s+find\b/i.test(normalized)
+  if (/\b(could not|cannot|can't|not able to)\s+find\b/i.test(normalized)) {
+    return true
+  }
+  return citations.length === 0
 }
 
 function readRequiredEnv(name: string): string {
