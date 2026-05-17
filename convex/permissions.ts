@@ -111,14 +111,19 @@ export async function ensureUserAndMembership(
     } else {
       const authenticatedEmail = (identity.email ?? overrides?.emailOverride)?.toLowerCase()?.trim()
       if (authenticatedEmail) {
-        const pendingInvite = await ctx.db
+        const now = Date.now()
+        const pendingInvites = await ctx.db
           .query('invites')
           .withIndex('by_emailNormalized_and_status', (q) =>
             q.eq('emailNormalized', authenticatedEmail).eq('status', 'pending'),
           )
-          .first()
+          .collect()
 
-        if (!pendingInvite || (pendingInvite.expiresAt && pendingInvite.expiresAt < Date.now())) {
+        const validInvite = pendingInvites.find(
+          (inv) => !inv.expiresAt || inv.expiresAt >= now,
+        )
+
+        if (!validInvite) {
           throw new Error('Not authorized for this internal app.')
         }
       } else {
