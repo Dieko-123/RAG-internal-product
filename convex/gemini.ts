@@ -475,19 +475,22 @@ export const internalPollIngestionJob = internalAction({
       return
     }
 
-    if (!job.geminiOperationName) {
-      if (job.geminiDocumentName || manualVersion.geminiDocumentName) {
-        await ctx.runMutation(internal.ingestionJobs.internalMarkActive, {
-          ingestionJobId: job._id,
-          manualId: job.manualId,
-          manualVersionId: job.manualVersionId,
-          geminiDocumentName: job.geminiDocumentName ?? manualVersion.geminiDocumentName,
-          geminiFileName: job.geminiFileName ?? manualVersion.geminiFileName,
-          actorTokenIdentifier: job.createdByTokenIdentifier,
-        })
-        return
-      }
+    const resolvedDocumentName = job.geminiDocumentName ?? manualVersion.geminiDocumentName
+    const resolvedFileName = job.geminiFileName ?? manualVersion.geminiFileName
 
+    if (resolvedDocumentName) {
+      await ctx.runMutation(internal.ingestionJobs.internalMarkActive, {
+        ingestionJobId: job._id,
+        manualId: job.manualId,
+        manualVersionId: job.manualVersionId,
+        geminiDocumentName: resolvedDocumentName,
+        geminiFileName: resolvedFileName,
+        actorTokenIdentifier: job.createdByTokenIdentifier,
+      })
+      return
+    }
+
+    if (!job.geminiOperationName) {
       await ctx.runMutation(internal.ingestionJobs.internalMarkFailed, {
         ingestionJobId: job._id,
         manualId: job.manualId,
