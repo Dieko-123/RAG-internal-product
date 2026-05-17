@@ -11,6 +11,7 @@
     "preview": "vite preview"
   },
   "dependencies": {
+    "@clerk/backend": "^3.4.9",
     "@clerk/react": "^6.6.4",
     "@google/genai": "^2.3.0",
     "convex": "^1.39.1",
