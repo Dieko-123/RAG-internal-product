@@ -224,13 +224,16 @@ function SignedInShell() {
   const canAccessAdmin = isAdmin || (uploadInfo?.canUpload ?? false)
   const activeView = !canAccessAdmin && view === 'admin' ? 'chat' : view
 
+  const clerkEmail = clerkUser?.primaryEmailAddress?.emailAddress
+  const clerkReady = isAuthenticated && isClerkUserLoaded && !!clerkEmail
+
   useEffect(() => {
-    if (!isAuthenticated || !isClerkUserLoaded || accessState !== 'idle') return
+    if (!clerkReady || accessState !== 'idle') return
 
     let cancelled = false
 
     void ensureCurrentUserAccess({
-      email: clerkUser?.primaryEmailAddress?.emailAddress ?? undefined,
+      email: clerkEmail,
       name: clerkUser?.fullName ?? undefined,
     })
       .then(() => {
@@ -255,9 +258,9 @@ function SignedInShell() {
   }, [
     accessState,
     ensureCurrentUserAccess,
-    isAuthenticated,
-    isClerkUserLoaded,
-    clerkUser,
+    clerkReady,
+    clerkEmail,
+    clerkUser?.fullName,
   ])
 
   function startNewChat() {
@@ -302,6 +305,16 @@ function SignedInShell() {
           <BrandMark />
           <h1>Access unavailable</h1>
           <p>{accessError ?? 'Not authorized for this internal app.'}</p>
+          <button
+            type="button"
+            className="btn"
+            onClick={() => {
+              setAccessState('idle')
+              setAccessError(null)
+            }}
+          >
+            Try again
+          </button>
         </div>
       </section>
     )
