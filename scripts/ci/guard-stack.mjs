@@ -50,8 +50,8 @@ const trackedFiles = execFileSync(
   'git',
   ['ls-files', '--cached', '--others', '--exclude-standard'],
   {
-  cwd: root,
-  encoding: 'utf8',
+    cwd: root,
+    encoding: 'utf8',
   },
 )
   .split(/\r?\n/)

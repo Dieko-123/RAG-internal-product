@@ -25,6 +25,7 @@ const citationValidator = v.object({
   fileSearchStore: v.optional(v.string()),
 })
 
+// TODO: optimize ingestion job lookup when manual count grows (N+1 query)
 export const listManuals = query({
   args: {},
   handler: async (ctx) => {
@@ -32,24 +33,44 @@ export const listManuals = query({
     const organization = await getDefaultOrganization(ctx)
     const manuals = await ctx.db.query('manuals').withIndex('by_slug').take(20)
 
-    if (!organization) {
-      return manuals.map((manual) => ({
+    const visibleManuals = organization
+      ? manuals.filter(
+          (manual) =>
+            manual.organizationId === undefined ||
+            manual.organizationId === organization._id,
+        )
+      : manuals
+
+    const results = []
+
+    for (const manual of visibleManuals) {
+      const jobs = await ctx.db
+        .query('ingestionJobs')
+        .withIndex('by_manualId', (q) => q.eq('manualId', manual._id))
+        .collect()
+      const latestIngestionJob = jobs.sort((a, b) => b.updatedAt - a.updatedAt)[0]
+
+      results.push({
         ...manual,
+        organizationId: manual.organizationId ?? organization?._id,
         visibility: manual.visibility ?? 'org',
-      }))
+        latestIngestionJob: latestIngestionJob
+          ? {
+              _id: latestIngestionJob._id,
+              status: latestIngestionJob.status,
+              lastError: latestIngestionJob.lastError,
+              canRetryIndexing: Boolean(
+                latestIngestionJob.geminiOperationName ||
+                  latestIngestionJob.geminiDocumentName ||
+                  latestIngestionJob.geminiFileName ||
+                  latestIngestionJob.status === 'indexing',
+              ),
+            }
+          : undefined,
+      })
     }
 
-    return manuals
-      .filter(
-        (manual) =>
-          manual.organizationId === undefined ||
-          manual.organizationId === organization._id,
-      )
-      .map((manual) => ({
-        ...manual,
-        organizationId: manual.organizationId ?? organization._id,
-        visibility: manual.visibility ?? 'org',
-      }))
+    return results
   },
 })
 
@@ -215,7 +236,7 @@ export const internalCreateManualVersion = internalMutation({
     versionLabel: v.string(),
     sourceFileName: v.string(),
     provider: v.literal('gemini_file_search'),
-    geminiFileSearchStoreName: v.string(),
+    geminiFileSearchStoreName: v.optional(v.string()),
     geminiFileSearchDocumentName: v.optional(v.string()),
     geminiFileName: v.optional(v.string()),
     mimeType: v.optional(v.string()),
@@ -258,17 +279,51 @@ export const internalMarkManualVersionActive = internalMutation({
     manualId: v.id('manuals'),
     manualVersionId: v.id('manualVersions'),
     geminiFileSearchDocumentName: v.optional(v.string()),
+    geminiFileSearchStoreName: v.optional(v.string()),
     geminiFileName: v.optional(v.string()),
   },
   handler: async (ctx, args) => {
     const now = Date.now()
-
-    await ctx.db.patch(args.manualVersionId, {
+    const versionPatch: {
+      status: 'active'
+      geminiFileSearchStoreName?: string
+      geminiFileSearchDocumentName?: string
+      geminiDocumentName?: string
+      geminiFileName?: string
+      updatedAt: number
+    } = {
       status: 'active',
-      geminiFileSearchDocumentName: args.geminiFileSearchDocumentName,
-      geminiFileName: args.geminiFileName,
       updatedAt: now,
-    })
+    }
+
+    if (args.geminiFileSearchStoreName) {
+      versionPatch.geminiFileSearchStoreName = args.geminiFileSearchStoreName
+    }
+
+    if (args.geminiFileSearchDocumentName) {
+      versionPatch.geminiFileSearchDocumentName = args.geminiFileSearchDocumentName
+      versionPatch.geminiDocumentName = args.geminiFileSearchDocumentName
+    }
+
+    if (args.geminiFileName) {
+      versionPatch.geminiFileName = args.geminiFileName
+    }
+
+    const manual = await ctx.db.get(args.manualId)
+    if (
+      manual?.currentVersionId &&
+      manual.currentVersionId !== args.manualVersionId
+    ) {
+      const previousVersion = await ctx.db.get(manual.currentVersionId)
+      if (previousVersion?.status === 'active') {
+        await ctx.db.patch(previousVersion._id, {
+          status: 'archived',
+          updatedAt: now,
+        })
+      }
+    }
+
+    await ctx.db.patch(args.manualVersionId, versionPatch)
 
     await ctx.db.patch(args.manualId, {
       status: 'active',
