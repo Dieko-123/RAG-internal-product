@@ -1,4 +1,28 @@
-import { query } from './_generated/server'
+import { v } from 'convex/values'
+import { internalQuery, mutation, query } from './_generated/server'
+import {
+  ensureUserAndMembership,
+  getDefaultOrganization,
+  isAdminIdentity,
+  requireOrgAdmin,
+  requireAllowedUser,
+} from './permissions'
+
+function toSafeIdentity(identity: {
+  subject: string
+  tokenIdentifier: string
+  issuer: string
+  email?: string | null
+  name?: string | null
+}) {
+  return {
+    subject: identity.subject,
+    tokenIdentifier: identity.tokenIdentifier,
+    issuer: identity.issuer,
+    email: identity.email ?? null,
+    name: identity.name ?? null,
+  }
+}
 
 export const getCurrentUser = query({
   args: {},
@@ -6,15 +30,248 @@ export const getCurrentUser = query({
     const identity = await ctx.auth.getUserIdentity()
 
     if (!identity) {
-      throw new Error('Not authenticated')
+      return null
     }
 
-    return {
-      subject: identity.subject,
-      tokenIdentifier: identity.tokenIdentifier,
-      issuer: identity.issuer,
-      email: identity.email ?? null,
-      name: identity.name ?? null,
+    return toSafeIdentity(identity)
+  },
+})
+
+export const isCurrentUserAdmin = query({
+  args: {},
+  handler: async (ctx) => {
+    const identity = await ctx.auth.getUserIdentity()
+
+    if (!identity) {
+      return false
     }
+
+    return isAdminIdentity(toSafeIdentity(identity))
+  },
+})
+
+export const ensureCurrentUserAccess = mutation({
+  args: {
+    email: v.optional(v.string()),
+    name: v.optional(v.string()),
+  },
+  handler: async (ctx, args) => {
+    const result = await ensureUserAndMembership(ctx, {
+      emailOverride: args.email,
+      nameOverride: args.name,
+    })
+
+    return {
+      organizationId: result.organizationId,
+      role: result.role,
+    }
+  },
+})
+
+export const listExistingUsersForAdmin = query({
+  args: {},
+  handler: async (ctx) => {
+    await requireOrgAdmin(ctx)
+
+    return await ctx.db.query('users').withIndex('by_email').take(100)
+  },
+})
+
+export const assignUserToDepartment = mutation({
+  args: {
+    userTokenIdentifier: v.string(),
+    departmentId: v.id('departments'),
+    role: v.union(v.literal('member'), v.literal('department_admin')),
+  },
+  handler: async (ctx, args) => {
+    const { identity, organizationId } = await requireOrgAdmin(ctx)
+    const now = Date.now()
+    const user = await ctx.db
+      .query('users')
+      .withIndex('by_tokenIdentifier', (q) =>
+        q.eq('tokenIdentifier', args.userTokenIdentifier),
+      )
+      .unique()
+
+    if (!user || user.status !== 'active') {
+      throw new Error('User must sign in before department assignment.')
+    }
+
+    const department = await ctx.db.get(args.departmentId)
+
+    if (!department || department.organizationId !== organizationId) {
+      throw new Error('Department not found.')
+    }
+
+    const organizationMembership = await ctx.db
+      .query('memberships')
+      .withIndex('by_organizationId_and_userTokenIdentifier', (q) =>
+        q
+          .eq('organizationId', organizationId)
+          .eq('userTokenIdentifier', args.userTokenIdentifier),
+      )
+      .filter((q) => q.eq(q.field('departmentId'), undefined))
+      .unique()
+
+    if (!organizationMembership) {
+      throw new Error('User must belong to the organization first.')
+    }
+
+    const existing = await ctx.db
+      .query('memberships')
+      .withIndex('by_departmentId_and_userTokenIdentifier', (q) =>
+        q
+          .eq('departmentId', args.departmentId)
+          .eq('userTokenIdentifier', args.userTokenIdentifier),
+      )
+      .unique()
+
+    if (existing) {
+      await ctx.db.patch(existing._id, {
+        role: args.role,
+        updatedAt: now,
+      })
+
+      await ctx.db.insert('auditEvents', {
+        actorTokenIdentifier: identity.tokenIdentifier,
+        action: 'membership_updated',
+        targetType: 'membership',
+        targetId: existing._id,
+        metadata: {
+          departmentName: department.name,
+          role: args.role,
+          userTokenIdentifier: args.userTokenIdentifier,
+        },
+        createdAt: now,
+      })
+
+      return existing._id
+    }
+
+    const membershipId = await ctx.db.insert('memberships', {
+      organizationId,
+      departmentId: args.departmentId,
+      userTokenIdentifier: args.userTokenIdentifier,
+      role: args.role,
+      createdAt: now,
+      updatedAt: now,
+    })
+
+    await ctx.db.insert('auditEvents', {
+      actorTokenIdentifier: identity.tokenIdentifier,
+      action: 'membership_assigned',
+      targetType: 'membership',
+      targetId: membershipId,
+      metadata: {
+        departmentName: department.name,
+        role: args.role,
+        userTokenIdentifier: args.userTokenIdentifier,
+      },
+      createdAt: now,
+    })
+
+    return membershipId
+  },
+})
+
+export const suspendUser = mutation({
+  args: {
+    userId: v.id('users'),
+  },
+  handler: async (ctx, args) => {
+    const { identity, organizationId } = await requireOrgAdmin(ctx)
+    const now = Date.now()
+    const user = await ctx.db.get(args.userId)
+
+    if (!user) {
+      throw new Error('User not found.')
+    }
+
+    if (user.status === 'suspended') {
+      return
+    }
+
+    if (user.tokenIdentifier === identity.tokenIdentifier) {
+      const orgAdmins = await ctx.db
+        .query('memberships')
+        .withIndex('by_organizationId', (q) => q.eq('organizationId', organizationId))
+        .filter((q) =>
+          q.and(
+            q.eq(q.field('departmentId'), undefined),
+            q.or(
+              q.eq(q.field('role'), 'owner'),
+              q.eq(q.field('role'), 'org_admin'),
+            ),
+          ),
+        )
+        .collect()
+
+      if (orgAdmins.length <= 1) {
+        throw new Error('Cannot suspend the last org admin.')
+      }
+    }
+
+    await ctx.db.patch(args.userId, { status: 'suspended', updatedAt: now })
+
+    await ctx.db.insert('auditEvents', {
+      actorTokenIdentifier: identity.tokenIdentifier,
+      action: 'user_suspended',
+      targetType: 'user',
+      targetId: args.userId,
+      metadata: {
+        email: user.email ?? '',
+        userTokenIdentifier: user.tokenIdentifier,
+      },
+      createdAt: now,
+    })
+  },
+})
+
+export const unsuspendUser = mutation({
+  args: {
+    userId: v.id('users'),
+  },
+  handler: async (ctx, args) => {
+    const { identity } = await requireOrgAdmin(ctx)
+    const now = Date.now()
+    const user = await ctx.db.get(args.userId)
+
+    if (!user) {
+      throw new Error('User not found.')
+    }
+
+    if (user.status === 'active') {
+      return
+    }
+
+    await ctx.db.patch(args.userId, { status: 'active', updatedAt: now })
+
+    await ctx.db.insert('auditEvents', {
+      actorTokenIdentifier: identity.tokenIdentifier,
+      action: 'user_unsuspended',
+      targetType: 'user',
+      targetId: args.userId,
+      metadata: {
+        email: user.email ?? '',
+        userTokenIdentifier: user.tokenIdentifier,
+      },
+      createdAt: now,
+    })
+  },
+})
+
+export const getCurrentOrganization = query({
+  args: {},
+  handler: async (ctx) => {
+    await requireOrgAdmin(ctx)
+
+    return await getDefaultOrganization(ctx)
+  },
+})
+
+export const internalRequireAllowedUser = internalQuery({
+  args: {},
+  handler: async (ctx) => {
+    return await requireAllowedUser(ctx)
   },
 })
