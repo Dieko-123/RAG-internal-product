@@ -2,7 +2,12 @@ import { v } from 'convex/values'
 import { internalMutation, internalQuery, mutation, query } from './_generated/server'
 import type { Id } from './_generated/dataModel'
 import type { QueryCtx } from './_generated/server'
-import { requireAllowedUser, requireOrgAdmin } from './permissions'
+import {
+  getDefaultOrganization,
+  getOrCreateDefaultOrganization,
+  requireAllowedUser,
+  requireOrgAdmin,
+} from './permissions'
 
 const manualStatus = v.union(
   v.literal('draft'),
@@ -24,8 +29,27 @@ export const listManuals = query({
   args: {},
   handler: async (ctx) => {
     await requireAllowedUser(ctx)
+    const organization = await getDefaultOrganization(ctx)
+    const manuals = await ctx.db.query('manuals').withIndex('by_slug').take(20)
 
-    return await ctx.db.query('manuals').withIndex('by_slug').take(20)
+    if (!organization) {
+      return manuals.map((manual) => ({
+        ...manual,
+        visibility: manual.visibility ?? 'org',
+      }))
+    }
+
+    return manuals
+      .filter(
+        (manual) =>
+          manual.organizationId === undefined ||
+          manual.organizationId === organization._id,
+      )
+      .map((manual) => ({
+        ...manual,
+        organizationId: manual.organizationId ?? organization._id,
+        visibility: manual.visibility ?? 'org',
+      }))
   },
 })
 
@@ -155,6 +179,7 @@ export const internalCreateManualIfMissing = internalMutation({
     actorTokenIdentifier: v.string(),
   },
   handler: async (ctx, args) => {
+    const organizationId = await getOrCreateDefaultOrganization(ctx)
     const now = Date.now()
     const existing = await ctx.db
       .query('manuals')
@@ -163,6 +188,8 @@ export const internalCreateManualIfMissing = internalMutation({
 
     if (existing) {
       await ctx.db.patch(existing._id, {
+        organizationId: existing.organizationId ?? organizationId,
+        visibility: existing.visibility ?? 'org',
         status: existing.status === 'active' ? 'active' : 'indexing',
         updatedAt: now,
       })
@@ -170,6 +197,8 @@ export const internalCreateManualIfMissing = internalMutation({
     }
 
     return await ctx.db.insert('manuals', {
+      organizationId,
+      visibility: 'org',
       title: args.title,
       slug: args.slug,
       status: 'indexing',
@@ -196,13 +225,22 @@ export const internalCreateManualVersion = internalMutation({
   },
   handler: async (ctx, args) => {
     const now = Date.now()
+    const manual = await ctx.db.get(args.manualId)
+    const organizationId =
+      manual?.organizationId ?? (await getOrCreateDefaultOrganization(ctx))
+    const visibility = manual?.visibility ?? 'org'
 
     return await ctx.db.insert('manualVersions', {
       manualId: args.manualId,
+      organizationId,
+      departmentId: manual?.departmentId,
+      visibility,
       versionLabel: args.versionLabel,
       sourceFileName: args.sourceFileName,
       provider: args.provider,
+      providerMode: 'legacy_per_manual_store',
       geminiFileSearchStoreName: args.geminiFileSearchStoreName,
+      geminiDocumentName: args.geminiFileSearchDocumentName,
       geminiFileSearchDocumentName: args.geminiFileSearchDocumentName,
       geminiFileName: args.geminiFileName,
       mimeType: args.mimeType,
@@ -341,6 +379,7 @@ export const internalWriteAuditEvent = internalMutation({
 })
 
 async function getActiveManualRecord(ctx: QueryCtx) {
+  const organization = await getDefaultOrganization(ctx)
   const manual = await ctx.db
     .query('manuals')
     .withIndex('by_status', (q) => q.eq('status', 'active'))
@@ -358,8 +397,20 @@ async function getActiveManualRecord(ctx: QueryCtx) {
   }
 
   return {
-    manual,
-    version,
+    manual: {
+      ...manual,
+      organizationId: manual.organizationId ?? organization?._id,
+      visibility: manual.visibility ?? 'org',
+    },
+    version: {
+      ...version,
+      organizationId: version.organizationId ?? manual.organizationId ?? organization?._id,
+      departmentId: version.departmentId ?? manual.departmentId,
+      visibility: version.visibility ?? manual.visibility ?? 'org',
+      providerMode: version.providerMode ?? 'legacy_per_manual_store',
+      geminiDocumentName:
+        version.geminiDocumentName ?? version.geminiFileSearchDocumentName,
+    },
   }
 }
 
@@ -384,7 +435,16 @@ async function getManualForQuestionRecord(
   }
 
   return {
-    manual,
-    version,
+    manual: {
+      ...manual,
+      visibility: manual.visibility ?? 'org',
+    },
+    version: {
+      ...version,
+      visibility: version.visibility ?? manual.visibility ?? 'org',
+      providerMode: version.providerMode ?? 'legacy_per_manual_store',
+      geminiDocumentName:
+        version.geminiDocumentName ?? version.geminiFileSearchDocumentName,
+    },
   }
 }

@@ -25,6 +25,17 @@ const membershipRole = v.union(
   v.literal('viewer'),
 )
 
+const manualVisibility = v.union(
+  v.literal('org'),
+  v.literal('department'),
+  v.literal('restricted'),
+)
+
+const providerMode = v.union(
+  v.literal('legacy_per_manual_store'),
+  v.literal('shared_org_store'),
+)
+
 export default defineSchema({
   organizations: defineTable({
     name: v.string(),
@@ -77,6 +88,9 @@ export default defineSchema({
     ]),
 
   manuals: defineTable({
+    organizationId: v.optional(v.id('organizations')),
+    departmentId: v.optional(v.id('departments')),
+    visibility: v.optional(manualVisibility),
     title: v.string(),
     slug: v.string(),
     status: manualStatus,
@@ -86,14 +100,22 @@ export default defineSchema({
     updatedAt: v.number(),
   })
     .index('by_slug', ['slug'])
-    .index('by_status', ['status']),
+    .index('by_status', ['status'])
+    .index('by_organizationId', ['organizationId'])
+    .index('by_departmentId', ['departmentId'])
+    .index('by_organizationId_and_status', ['organizationId', 'status']),
 
   manualVersions: defineTable({
     manualId: v.id('manuals'),
+    organizationId: v.optional(v.id('organizations')),
+    departmentId: v.optional(v.id('departments')),
+    visibility: v.optional(manualVisibility),
     versionLabel: v.string(),
     sourceFileName: v.string(),
     provider: v.literal('gemini_file_search'),
+    providerMode: v.optional(providerMode),
     geminiFileSearchStoreName: v.string(),
+    geminiDocumentName: v.optional(v.string()),
     geminiFileSearchDocumentName: v.optional(v.string()),
     geminiFileName: v.optional(v.string()),
     mimeType: v.optional(v.string()),
@@ -106,7 +128,10 @@ export default defineSchema({
   })
     .index('by_manualId', ['manualId'])
     .index('by_status', ['status'])
-    .index('by_manualId_and_status', ['manualId', 'status']),
+    .index('by_manualId_and_status', ['manualId', 'status'])
+    .index('by_organizationId', ['organizationId'])
+    .index('by_departmentId', ['departmentId'])
+    .index('by_providerMode', ['providerMode']),
 
   questions: defineTable({
     manualId: v.id('manuals'),
@@ -131,6 +156,10 @@ export default defineSchema({
 
   chatSessions: defineTable({
     userTokenIdentifier: v.string(),
+    organizationId: v.optional(v.id('organizations')),
+    scopeMode: v.optional(v.literal('selected')),
+    selectedManualIds: v.optional(v.array(v.id('manuals'))),
+    selectedManualVersionIds: v.optional(v.array(v.id('manualVersions'))),
     manualId: v.id('manuals'),
     manualVersionId: v.id('manualVersions'),
     title: v.string(),

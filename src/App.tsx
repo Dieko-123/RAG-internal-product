@@ -29,6 +29,7 @@ type ManualListItem = {
   title: string
   slug: string
   status: string
+  visibility?: 'org' | 'department' | 'restricted'
 }
 
 type ChatSessionId = Id<'chatSessions'>
@@ -1212,7 +1213,10 @@ function ManualStatusList({
           <div className="manual-row" key={manual._id}>
             <div>
               <strong>{manual.title}</strong>
-              <span>{manual.slug}</span>
+              <span>
+                {manual.slug}
+                {manual.visibility ? ` / ${manual.visibility}` : ''}
+              </span>
             </div>
             <div className="manual-row-actions">
               <mark>{manual.status}</mark>

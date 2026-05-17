@@ -81,10 +81,21 @@ export const archiveDepartment = mutation({
       .query('memberships')
       .withIndex('by_departmentId', (q) => q.eq('departmentId', args.departmentId))
       .collect()
+    const activeManuals = await ctx.db
+      .query('manuals')
+      .withIndex('by_departmentId', (q) => q.eq('departmentId', args.departmentId))
+      .filter((q) => q.neq(q.field('status'), 'archived'))
+      .take(1)
 
     if (activeMemberships.length > 0) {
       throw new Error(
         'Cannot archive department with active members. Remove all members first.',
+      )
+    }
+
+    if (activeManuals.length > 0) {
+      throw new Error(
+        'Cannot archive department with active manuals. Archive those manuals first.',
       )
     }
 

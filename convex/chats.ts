@@ -1,7 +1,7 @@
 import { v } from 'convex/values'
 import { internalMutation, mutation, query } from './_generated/server'
 import type { MutationCtx } from './_generated/server'
-import { requireAllowedUser } from './permissions'
+import { getDefaultOrganization, requireAllowedUser } from './permissions'
 
 const citationValidator = v.object({
   title: v.optional(v.string()),
@@ -79,6 +79,10 @@ export const createChatSession = mutation({
 
     return await ctx.db.insert('chatSessions', {
       userTokenIdentifier: user.tokenIdentifier,
+      organizationId: activeManual.manual.organizationId,
+      scopeMode: 'selected',
+      selectedManualIds: [activeManual.manual._id],
+      selectedManualVersionIds: [activeManual.version._id],
       manualId: activeManual.manual._id,
       manualVersionId: activeManual.version._id,
       title: 'New chat',
@@ -135,8 +139,13 @@ export const internalRecordChatExchange = internalMutation({
         throw new Error('Chat not found')
       }
     } else {
+      const manual = await ctx.db.get(args.manualId)
       chatSessionId = await ctx.db.insert('chatSessions', {
         userTokenIdentifier: args.userTokenIdentifier,
+        organizationId: manual?.organizationId,
+        scopeMode: 'selected',
+        selectedManualIds: [args.manualId],
+        selectedManualVersionIds: [args.manualVersionId],
         manualId: args.manualId,
         manualVersionId: args.manualVersionId,
         title: normalizeTitle(args.title),
@@ -185,6 +194,7 @@ export const internalRecordChatExchange = internalMutation({
 })
 
 async function getActiveManualRecord(ctx: MutationCtx) {
+  const organization = await getDefaultOrganization(ctx)
   const manual = await ctx.db
     .query('manuals')
     .withIndex('by_status', (q) => q.eq('status', 'active'))
@@ -201,7 +211,17 @@ async function getActiveManualRecord(ctx: MutationCtx) {
     return null
   }
 
-  return { manual, version }
+  return {
+    manual: {
+      ...manual,
+      organizationId: manual.organizationId ?? organization?._id,
+      visibility: manual.visibility ?? 'org',
+    },
+    version: {
+      ...version,
+      providerMode: version.providerMode ?? 'legacy_per_manual_store',
+    },
+  }
 }
 
 function normalizeTitle(value: string): string {
