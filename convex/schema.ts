@@ -17,7 +17,65 @@ const citation = v.object({
   fileSearchStore: v.optional(v.string()),
 })
 
+const membershipRole = v.union(
+  v.literal('owner'),
+  v.literal('org_admin'),
+  v.literal('department_admin'),
+  v.literal('member'),
+  v.literal('viewer'),
+)
+
 export default defineSchema({
+  organizations: defineTable({
+    name: v.string(),
+    slug: v.string(),
+    geminiFileSearchStoreName: v.optional(v.string()),
+    createdAt: v.number(),
+    updatedAt: v.number(),
+  }).index('by_slug', ['slug']),
+
+  departments: defineTable({
+    organizationId: v.id('organizations'),
+    name: v.string(),
+    slug: v.string(),
+    status: v.optional(v.union(v.literal('active'), v.literal('archived'))),
+    createdAt: v.number(),
+    updatedAt: v.number(),
+  })
+    .index('by_organizationId', ['organizationId'])
+    .index('by_organizationId_and_slug', ['organizationId', 'slug']),
+
+  users: defineTable({
+    tokenIdentifier: v.string(),
+    email: v.optional(v.string()),
+    name: v.optional(v.string()),
+    status: v.union(v.literal('active'), v.literal('suspended')),
+    createdAt: v.number(),
+    updatedAt: v.number(),
+  })
+    .index('by_tokenIdentifier', ['tokenIdentifier'])
+    .index('by_email', ['email']),
+
+  memberships: defineTable({
+    organizationId: v.id('organizations'),
+    departmentId: v.optional(v.id('departments')),
+    userTokenIdentifier: v.string(),
+    role: membershipRole,
+    createdAt: v.number(),
+    updatedAt: v.number(),
+  })
+    .index('by_userTokenIdentifier', ['userTokenIdentifier'])
+    .index('by_organizationId', ['organizationId'])
+    .index('by_organizationId_and_userTokenIdentifier', [
+      'organizationId',
+      'userTokenIdentifier',
+    ])
+    .index('by_departmentId', ['departmentId'])
+    .index('by_departmentId_and_userTokenIdentifier', [
+      'departmentId',
+      'userTokenIdentifier',
+    ]),
+
   manuals: defineTable({
     title: v.string(),
     slug: v.string(),
@@ -38,6 +96,8 @@ export default defineSchema({
     geminiFileSearchStoreName: v.string(),
     geminiFileSearchDocumentName: v.optional(v.string()),
     geminiFileName: v.optional(v.string()),
+    mimeType: v.optional(v.string()),
+    sizeBytes: v.optional(v.number()),
     status: manualStatus,
     errorMessage: v.optional(v.string()),
     createdByTokenIdentifier: v.string(),
@@ -74,6 +134,8 @@ export default defineSchema({
     manualId: v.id('manuals'),
     manualVersionId: v.id('manualVersions'),
     title: v.string(),
+    pinned: v.optional(v.boolean()),
+    pinnedAt: v.optional(v.number()),
     createdAt: v.number(),
     updatedAt: v.number(),
   })

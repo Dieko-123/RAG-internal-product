@@ -1,7 +1,7 @@
 import { v } from 'convex/values'
 import { internalMutation, mutation, query } from './_generated/server'
 import type { MutationCtx } from './_generated/server'
-import { requireUser } from './permissions'
+import { requireAllowedUser } from './permissions'
 
 const citationValidator = v.object({
   title: v.optional(v.string()),
@@ -14,15 +14,26 @@ const citationValidator = v.object({
 export const listChatSessions = query({
   args: {},
   handler: async (ctx) => {
-    const user = await requireUser(ctx)
+    const user = await requireAllowedUser(ctx)
 
-    return await ctx.db
+    const sessions = await ctx.db
       .query('chatSessions')
       .withIndex('by_userTokenIdentifier_and_updatedAt', (q) =>
         q.eq('userTokenIdentifier', user.tokenIdentifier),
       )
       .order('desc')
       .take(40)
+
+    return sessions.sort((a, b) => {
+      if (Boolean(a.pinned) !== Boolean(b.pinned)) {
+        return a.pinned ? -1 : 1
+      }
+
+      const aSortTime = a.pinned ? (a.pinnedAt ?? a.updatedAt) : a.updatedAt
+      const bSortTime = b.pinned ? (b.pinnedAt ?? b.updatedAt) : b.updatedAt
+
+      return bSortTime - aSortTime
+    })
   },
 })
 
@@ -31,7 +42,7 @@ export const listChatMessages = query({
     chatSessionId: v.optional(v.id('chatSessions')),
   },
   handler: async (ctx, args) => {
-    const user = await requireUser(ctx)
+    const user = await requireAllowedUser(ctx)
 
     if (!args.chatSessionId) {
       return []
@@ -44,19 +55,22 @@ export const listChatMessages = query({
       throw new Error('Chat not found')
     }
 
-    return await ctx.db
+    const newestMessages = await ctx.db
       .query('chatMessages')
       .withIndex('by_chatSessionId', (q) =>
         q.eq('chatSessionId', chatSessionId),
       )
+      .order('desc')
       .take(100)
+
+    return newestMessages.reverse()
   },
 })
 
 export const createChatSession = mutation({
   args: {},
   handler: async (ctx) => {
-    const user = await requireUser(ctx)
+    const user = await requireAllowedUser(ctx)
     const activeManual = await getActiveManualRecord(ctx)
 
     if (!activeManual) {
@@ -68,8 +82,29 @@ export const createChatSession = mutation({
       manualId: activeManual.manual._id,
       manualVersionId: activeManual.version._id,
       title: 'New chat',
+      pinned: false,
       createdAt: Date.now(),
       updatedAt: Date.now(),
+    })
+  },
+})
+
+export const setChatPinned = mutation({
+  args: {
+    chatSessionId: v.id('chatSessions'),
+    pinned: v.boolean(),
+  },
+  handler: async (ctx, args) => {
+    const user = await requireAllowedUser(ctx)
+    const session = await ctx.db.get(args.chatSessionId)
+
+    if (!session || session.userTokenIdentifier !== user.tokenIdentifier) {
+      throw new Error('Chat not found')
+    }
+
+    await ctx.db.patch(args.chatSessionId, {
+      pinned: args.pinned,
+      pinnedAt: args.pinned ? Date.now() : undefined,
     })
   },
 })
@@ -105,6 +140,7 @@ export const internalRecordChatExchange = internalMutation({
         manualId: args.manualId,
         manualVersionId: args.manualVersionId,
         title: normalizeTitle(args.title),
+        pinned: false,
         createdAt: now,
         updatedAt: now,
       })
@@ -171,5 +207,34 @@ async function getActiveManualRecord(ctx: MutationCtx) {
 function normalizeTitle(value: string): string {
   const trimmed = value.trim().replace(/\s+/g, ' ')
   if (!trimmed) return 'New chat'
-  return trimmed.length <= 64 ? trimmed : `${trimmed.slice(0, 61)}...`
+
+  const withoutQuestionPrefix = trimmed
+    .replace(/^(can|could|would|should|do|does|did|what|when|where|why|how|is|are)\s+(i|we|you|the|this|that|there|it)?\s*/i, '')
+    .replace(/^(tell|explain|describe|show|summarize)\s+(me\s+)?(about\s+)?/i, '')
+  const stopWords = new Set([
+    'a',
+    'an',
+    'and',
+    'are',
+    'for',
+    'from',
+    'in',
+    'my',
+    'of',
+    'on',
+    'the',
+    'to',
+    'we',
+    'with',
+    'your',
+  ])
+  const meaningfulWords = withoutQuestionPrefix
+    .split(' ')
+    .map((word) => word.replace(/^[^\w]+|[^\w]+$/g, ''))
+    .filter((word) => word.length > 0 && !stopWords.has(word.toLowerCase()))
+  const words = meaningfulWords.length > 0 ? meaningfulWords : trimmed.split(' ')
+  const candidate = words.slice(0, 4).join(' ')
+  const normalized = candidate.length <= 34 ? candidate : candidate.slice(0, 31)
+
+  return normalized.replace(/[.,;:!?-]+$/, '') || 'New chat'
 }
