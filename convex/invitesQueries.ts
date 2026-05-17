@@ -134,6 +134,9 @@ export const internalGetPendingInviteByEmail = internalQuery({
       .first()
 
     if (invite && invite.organizationId === args.organizationId) {
+      if (invite.expiresAt && invite.expiresAt < Date.now()) {
+        return null
+      }
       return invite._id
     }
     return null
@@ -208,7 +211,7 @@ export const internalRevokeInvite = internalMutation({
       (await isOrgAdminOrOwner(ctx, organization._id, identity.tokenIdentifier))
 
     if (!isOrgLevel) {
-      if (!invite.departmentId) {
+      if (!invite.departmentId || invite.role === 'org_admin') {
         throw new Error('Only org admins can revoke org-level invites.')
       }
       const deptMembership = await ctx.db

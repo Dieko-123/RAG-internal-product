@@ -834,14 +834,18 @@ function AdminWorkspace({
     setError(null)
 
     try {
-      await inviteUser({
+      const result = await inviteUser({
         email,
         role: inviteRole,
         departmentId: effectiveInviteDepartmentId || undefined,
         departmentRole: effectiveInviteDepartmentId ? inviteDepartmentRole : undefined,
       })
       setInviteEmail('')
-      setMessage(`Invitation sent to ${email}`)
+      setMessage(
+        result.userAlreadyExists
+          ? `${email} already has an account — they can sign in now to get access.`
+          : `Invitation sent to ${email}`,
+      )
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Invite failed')
     } finally {
