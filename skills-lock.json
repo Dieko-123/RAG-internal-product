@@ -1,6 +1,12 @@
 {
   "version": 1,
   "skills": {
+    "babysit-pr": {
+      "source": "openai/codex",
+      "sourceType": "github",
+      "skillPath": ".codex/skills/babysit-pr/SKILL.md",
+      "computedHash": "f864e2a78668cb35587e8cba9fadc45dd803a0143bf72732309f26e827cfb1f4"
+    },
     "convex": {
       "source": "get-convex/agent-skills",
       "sourceType": "github",
@@ -60,6 +66,12 @@
       "sourceType": "github",
       "skillPath": "skills/productivity/handoff/SKILL.md",
       "computedHash": "da4dbb91d4556dac70c27ad2a0de223ba3475bfe8919162edee6867b4056751a"
+    },
+    "impeccable": {
+      "source": "pbakaus/impeccable",
+      "sourceType": "github",
+      "skillPath": "skill/SKILL.md",
+      "computedHash": "c8f645c3e9aace8baf528021165168bac77d4f761f0ab7baf45e06e01691500f"
     },
     "improve-codebase-architecture": {
       "source": "mattpocock/skills",

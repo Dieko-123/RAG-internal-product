@@ -1,0 +1,49 @@
+name: CI Main
+
+on:
+  pull_request:
+    branches:
+      - main
+
+env:
+  VITE_CONVEX_URL: https://example.convex.cloud
+  VITE_CLERK_PUBLISHABLE_KEY: pk_test_placeholder
+
+jobs:
+  checks:
+    name: Release checks
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Require dev as release source
+        if: github.event_name == 'pull_request' && github.base_ref == 'main' && github.head_ref != 'dev'
+        run: |
+          echo "Release PRs into main must come from dev. Current source: ${{ github.head_ref }}"
+          exit 1
+
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Lint
+        run: npm run lint
+
+      - name: Typecheck
+        run: npm run typecheck
+
+      - name: Build
+        run: npm run build
+
+      - name: Secret guard
+        run: node scripts/ci/guard-secrets.mjs
+
+      - name: Stack guard
+        run: node scripts/ci/guard-stack.mjs
