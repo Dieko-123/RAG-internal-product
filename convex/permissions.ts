@@ -97,12 +97,12 @@ export async function ensureUserAndMembership(
   const identity = await requireUser(ctx)
 
   if (!isAdminIdentity(identity) && !isAllowedIdentity(identity)) {
-    const email = (overrides?.emailOverride ?? identity.email)?.toLowerCase()?.trim()
-    if (email) {
+    const authenticatedEmail = identity.email?.toLowerCase()?.trim()
+    if (authenticatedEmail) {
       const pendingInvite = await ctx.db
         .query('invites')
         .withIndex('by_emailNormalized_and_status', (q) =>
-          q.eq('emailNormalized', email).eq('status', 'pending'),
+          q.eq('emailNormalized', authenticatedEmail).eq('status', 'pending'),
         )
         .first()
 

@@ -62,7 +62,7 @@ export const ensureCurrentUserAccess = mutation({
       nameOverride: args.name,
     })
 
-    const emailNormalized = (args.email ?? result.identity.email)?.toLowerCase()?.trim()
+    const emailNormalized = result.identity.email?.toLowerCase()?.trim()
     if (emailNormalized) {
       const pendingInvite = await ctx.db
         .query('invites')
@@ -119,6 +119,14 @@ export const ensureCurrentUserAccess = mutation({
                 userTokenIdentifier: result.identity.tokenIdentifier,
                 role: pendingInvite.departmentRole ?? 'member',
                 createdAt: now,
+                updatedAt: now,
+              })
+            } else if (
+              pendingInvite.departmentRole &&
+              existingDeptMembership.role !== pendingInvite.departmentRole
+            ) {
+              await ctx.db.patch(existingDeptMembership._id, {
+                role: pendingInvite.departmentRole,
                 updatedAt: now,
               })
             }
