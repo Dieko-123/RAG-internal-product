@@ -97,7 +97,7 @@ export async function ensureUserAndMembership(
   const identity = await requireUser(ctx)
 
   if (!isAdminIdentity(identity) && !isAllowedIdentity(identity)) {
-    const authenticatedEmail = identity.email?.toLowerCase()?.trim()
+    const authenticatedEmail = (identity.email ?? overrides?.emailOverride)?.toLowerCase()?.trim()
     if (authenticatedEmail) {
       const pendingInvite = await ctx.db
         .query('invites')

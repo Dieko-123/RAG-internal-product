@@ -62,7 +62,7 @@ export const ensureCurrentUserAccess = mutation({
       nameOverride: args.name,
     })
 
-    const emailNormalized = result.identity.email?.toLowerCase()?.trim()
+    const emailNormalized = (result.identity.email ?? args.email)?.toLowerCase()?.trim()
     if (emailNormalized) {
       const pendingInvite = await ctx.db
         .query('invites')
