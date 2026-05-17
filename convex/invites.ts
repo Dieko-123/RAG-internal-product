@@ -75,6 +75,7 @@ export const inviteUser = action({
           departmentId: args.departmentId ?? null,
           departmentRole: args.departmentRole ?? null,
         },
+        notify: true,
       })
       clerkInvitationId = invitation.id
     } catch (clerkError) {
