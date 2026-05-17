@@ -70,6 +70,34 @@ type DepartmentMember = {
   role: 'owner' | 'org_admin' | 'department_admin' | 'member' | 'viewer'
 }
 
+type ChatMessage = {
+  _id: Id<'chatMessages'>
+  role: 'user' | 'assistant'
+  content: string
+  refusal?: boolean
+  citations?: Array<{
+    title?: string
+    uri?: string
+    pageNumber?: number
+    excerpt?: string
+    sourceFileName?: string
+    providerUri?: string
+  }>
+  warning?: string
+  model?: string
+  latencyMs?: number
+  sourceFileName?: string
+}
+
+type Invite = {
+  _id: Id<'invites'>
+  email: string
+  role: 'org_admin' | 'member' | 'viewer'
+  departmentId?: DepartmentId
+  departmentRole?: 'department_admin' | 'member' | 'viewer'
+  status: 'pending' | 'accepted' | 'revoked' | 'expired'
+}
+
 const maxManualUploadBytes = 25 * 1024 * 1024
 const supportedManualExtensions = ['pdf', 'txt', 'md']
 const supportedManualMimeTypes = [
@@ -196,13 +224,16 @@ function SignedInShell() {
   const canAccessAdmin = isAdmin || (uploadInfo?.canUpload ?? false)
   const activeView = !canAccessAdmin && view === 'admin' ? 'chat' : view
 
+  const clerkEmail = clerkUser?.primaryEmailAddress?.emailAddress
+  const clerkReady = isAuthenticated && isClerkUserLoaded && !!clerkEmail
+
   useEffect(() => {
-    if (!isAuthenticated || !isClerkUserLoaded || accessState !== 'idle') return
+    if (!clerkReady || accessState !== 'idle') return
 
     let cancelled = false
 
     void ensureCurrentUserAccess({
-      email: clerkUser?.primaryEmailAddress?.emailAddress ?? undefined,
+      email: clerkEmail,
       name: clerkUser?.fullName ?? undefined,
     })
       .then(() => {
@@ -227,9 +258,9 @@ function SignedInShell() {
   }, [
     accessState,
     ensureCurrentUserAccess,
-    isAuthenticated,
-    isClerkUserLoaded,
-    clerkUser,
+    clerkReady,
+    clerkEmail,
+    clerkUser?.fullName,
   ])
 
   function startNewChat() {
@@ -274,6 +305,16 @@ function SignedInShell() {
           <BrandMark />
           <h1>Access unavailable</h1>
           <p>{accessError ?? 'Not authorized for this internal app.'}</p>
+          <button
+            type="button"
+            className="btn"
+            onClick={() => {
+              setAccessState('idle')
+              setAccessError(null)
+            }}
+          >
+            Try again
+          </button>
         </div>
       </section>
     )
@@ -362,14 +403,14 @@ function SignedInShell() {
                 <>
                   <ChatSessionGroup
                     label="Pinned"
-                    sessions={(chatSessions ?? []).filter((session) => session.pinned)}
+                    sessions={(chatSessions ?? []).filter((session: ChatSession) => session.pinned)}
                     selectedChatId={selectedChatId}
                     onOpenChat={openChat}
                     onTogglePinned={togglePinned}
                   />
                   <ChatSessionGroup
                     label="Recent"
-                    sessions={(chatSessions ?? []).filter((session) => !session.pinned)}
+                    sessions={(chatSessions ?? []).filter((session: ChatSession) => !session.pinned)}
                     selectedChatId={selectedChatId}
                     onOpenChat={openChat}
                     onTogglePinned={togglePinned}
@@ -398,7 +439,7 @@ function SignedInShell() {
         ) : activeView === 'documents' ? (
           <DocumentsWorkspace canQuery={accessState === 'ready'} />
         ) : (
-          <AdminWorkspace canQuery={accessState === 'ready'} isOrgAdmin={!!isAdmin} uploadInfo={uploadInfo} />
+          <AdminWorkspace canQuery={accessState === 'ready'} isOrgAdmin={!!isAdmin || uploadInfo?.role === 'org_admin'} uploadInfo={uploadInfo} />
         )}
       </div>
     </section>
@@ -562,7 +603,7 @@ function ChatWorkspace({
             </div>
           ) : (
             <>
-              {displayedMessages.map((message) => (
+              {displayedMessages.map((message: ChatMessage) => (
                 <article
                   className={
                     message.role === 'assistant'
@@ -747,15 +788,15 @@ function AdminWorkspace({
   )
   const departments = useQuery(
     api.departments.listDepartments,
-    canQuery ? {} : 'skip',
+    canQuery && isOrgAdmin ? {} : 'skip',
   )
   const users = useQuery(
     api.users.listExistingUsersForAdmin,
-    canQuery ? {} : 'skip',
+    canQuery && isOrgAdmin ? {} : 'skip',
   )
   const departmentMembers = useQuery(
     api.departments.listDepartmentMembers,
-    canQuery && selectedDepartmentId
+    canQuery && isOrgAdmin && selectedDepartmentId
       ? { departmentId: selectedDepartmentId }
       : 'skip',
   )
@@ -773,6 +814,44 @@ function AdminWorkspace({
   )
   const suspendUser = useMutation(api.users.suspendUser)
   const unsuspendUser = useMutation(api.users.unsuspendUser)
+  const invites = useQuery(api.invitesQueries.listInvites, canQuery ? {} : 'skip')
+  const inviteUser = useAction(api.invites.inviteUser)
+  const revokeInviteAction = useAction(api.invites.revokeInvite)
+  const [inviteEmail, setInviteEmail] = useState('')
+  const [inviteRole, setInviteRole] = useState<'member' | 'org_admin' | 'viewer'>('member')
+  const [inviteDepartmentId, setInviteDepartmentId] = useState<DepartmentId | ''>('')
+  const [inviteDepartmentRole, setInviteDepartmentRole] = useState<'member' | 'department_admin' | 'viewer'>('member')
+  const [isInviting, setIsInviting] = useState(false)
+  const effectiveInviteDepartmentId = inviteDepartmentId
+    || (!isOrgAdmin && uploadInfo?.departments?.length === 1 ? uploadInfo.departments[0]._id : '')
+
+  async function handleInviteUser() {
+    const email = inviteEmail.trim()
+    if (!email || isInviting) return
+
+    setIsInviting(true)
+    setMessage(null)
+    setError(null)
+
+    try {
+      const result = await inviteUser({
+        email,
+        role: inviteRole,
+        departmentId: effectiveInviteDepartmentId || undefined,
+        departmentRole: effectiveInviteDepartmentId ? inviteDepartmentRole : undefined,
+      })
+      setInviteEmail('')
+      setMessage(
+        result.userAlreadyExists
+          ? `${email} already has an account — they can sign in now to get access.`
+          : `Invitation sent to ${email}`,
+      )
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Invite failed')
+    } finally {
+      setIsInviting(false)
+    }
+  }
 
   async function handleIngest() {
     setIsIngesting(true)
@@ -967,7 +1046,7 @@ function AdminWorkspace({
               >
                 <option value="">Select department</option>
                 {(isOrgAdmin ? (departments ?? []) : (uploadInfo?.departments ?? [])).map(
-                  (dept) => (
+                  (dept: Department) => (
                     <option value={dept._id} key={dept._id}>
                       {dept.name}
                     </option>
@@ -1026,6 +1105,119 @@ function AdminWorkspace({
             })
           }}
         />
+
+        <section className="manual-panel admin-org-panel">
+          <div>
+            <h2>Invite user</h2>
+            <p>Send an invitation email. Users appear after sign-up.</p>
+          </div>
+          <label className="field-label">
+            Email
+            <input
+              type="email"
+              value={inviteEmail}
+              onChange={(event) => setInviteEmail(event.target.value)}
+              placeholder="user@example.com"
+              disabled={isInviting}
+            />
+          </label>
+          {isOrgAdmin ? (
+            <label className="field-label">
+              Org role
+              <select
+                value={inviteRole}
+                onChange={(event) =>
+                  setInviteRole(event.target.value as 'member' | 'org_admin' | 'viewer')
+                }
+                disabled={isInviting}
+              >
+                <option value="member">Member</option>
+                <option value="org_admin">Org admin</option>
+                <option value="viewer">Viewer</option>
+              </select>
+            </label>
+          ) : null}
+          <label className="field-label">
+            Department (optional)
+            <select
+              value={effectiveInviteDepartmentId}
+              onChange={(event) =>
+                setInviteDepartmentId(event.target.value as DepartmentId | '')
+              }
+              disabled={isInviting || (!isOrgAdmin && (uploadInfo?.departments ?? []).length <= 1)}
+            >
+              <option value="">No department</option>
+              {(isOrgAdmin ? (departments ?? []) : (uploadInfo?.departments ?? [])).map(
+                (dept: Department) => (
+                  <option value={dept._id} key={dept._id}>
+                    {dept.name}
+                  </option>
+                ),
+              )}
+            </select>
+          </label>
+          {effectiveInviteDepartmentId && isOrgAdmin ? (
+            <label className="field-label">
+              Department role
+              <select
+                value={inviteDepartmentRole}
+                onChange={(event) =>
+                  setInviteDepartmentRole(
+                    event.target.value as 'member' | 'department_admin' | 'viewer',
+                  )
+                }
+                disabled={isInviting}
+              >
+                <option value="member">Member</option>
+                <option value="department_admin">Department admin</option>
+                <option value="viewer">Viewer</option>
+              </select>
+            </label>
+          ) : null}
+          <button
+            type="button"
+            className="btn btn-primary"
+            disabled={!inviteEmail.trim() || isInviting}
+            onClick={() => void handleInviteUser()}
+          >
+            {isInviting ? 'Sending...' : 'Send invitation'}
+          </button>
+          {(invites ?? []).length > 0 ? (
+            <div className="compact-list" aria-label="Pending invites">
+              <div className="history-group-label">Invitations</div>
+              {(invites ?? []).map((invite: Invite) => (
+                <div className="compact-row" key={invite._id}>
+                  <div>
+                    <strong>{invite.email}</strong>
+                    <span>
+                      {invite.role}
+                      {invite.departmentRole ? ` / ${invite.departmentRole}` : ''}
+                      {' — '}
+                      {invite.status}
+                    </span>
+                  </div>
+                  {invite.status === 'pending' ? (
+                    <button
+                      type="button"
+                      className="btn-small btn-danger"
+                      onClick={() => {
+                        if (confirm(`Revoke invite for ${invite.email}?`)) {
+                          void revokeInviteAction({ inviteId: invite._id })
+                            .then(() => setMessage('Invite revoked'))
+                            .catch((err) =>
+                              setError(err instanceof Error ? err.message : 'Revoke failed'),
+                            )
+                        }
+                      }}
+                    >
+                      Revoke
+                    </button>
+                  ) : null}
+                </div>
+              ))}
+            </div>
+          ) : null}
+        </section>
 
         {isOrgAdmin ? (
           <section className="manual-panel admin-org-panel">
