@@ -275,3 +275,10 @@ export const internalRequireAllowedUser = internalQuery({
     return await requireAllowedUser(ctx)
   },
 })
+
+export const internalRequireOrgAdmin = internalQuery({
+  args: {},
+  handler: async (ctx) => {
+    return await requireOrgAdmin(ctx)
+  },
+})

@@ -30,6 +30,12 @@ type ManualListItem = {
   slug: string
   status: string
   visibility?: 'org' | 'department' | 'restricted'
+  latestIngestionJob?: {
+    _id: Id<'ingestionJobs'>
+    status: 'queued' | 'uploading' | 'indexing' | 'active' | 'failed'
+    lastError?: string
+    canRetryIndexing: boolean
+  }
 }
 
 type ChatSessionId = Id<'chatSessions'>
@@ -669,6 +675,7 @@ function AdminWorkspace({ canQuery }: { canQuery: boolean }) {
   )
   const ingestDummyManual = useAction(api.gemini.ingestDummyManual)
   const ingestUploadedManual = useAction(api.gemini.ingestUploadedManual)
+  const retryIndexing = useAction(api.gemini.retryIndexing)
   const generateManualUploadUrl = useMutation(api.manuals.generateManualUploadUrl)
   const createDepartment = useMutation(api.departments.createDepartment)
   const assignUserToDepartment = useMutation(api.users.assignUserToDepartment)
@@ -740,7 +747,7 @@ function AdminWorkspace({ canQuery }: { canQuery: boolean }) {
         sizeBytes: selectedFile.size,
       })
 
-      setMessage(`${result.title} is active. Store: ${result.geminiFileSearchStoreName}`)
+      setMessage(`${result.title} queued for indexing.`)
       setSelectedFile(null)
       setManualTitle('')
     } catch (err) {
@@ -866,6 +873,13 @@ function AdminWorkspace({ canQuery }: { canQuery: boolean }) {
 
         <ManualStatusList
           manuals={manuals}
+          onRetry={(ingestionJobId) => {
+            void retryIndexing({ ingestionJobId }).then(() => {
+              setMessage('Retry indexing queued')
+            }).catch((err) => {
+              setError(err instanceof Error ? err.message : 'Retry failed')
+            })
+          }}
           onArchive={(manualId) => {
             void archiveManual({ manualId }).then(() => {
               setMessage('Manual archived')
@@ -1193,10 +1207,12 @@ function UserList({
 
 function ManualStatusList({
   manuals,
+  onRetry,
   onArchive,
   onRestore,
 }: {
   manuals: ManualListItem[] | undefined
+  onRetry?: (ingestionJobId: Id<'ingestionJobs'>) => void
   onArchive?: (manualId: Id<'manuals'>) => void
   onRestore?: (manualId: Id<'manuals'>) => void
 }) {
@@ -1236,9 +1252,30 @@ function ManualStatusList({
                 {manual.slug}
                 {manual.visibility ? ` / ${manual.visibility}` : ''}
               </span>
+              {manual.latestIngestionJob?.lastError ? (
+                <span className="manual-error">
+                  {manual.latestIngestionJob.lastError}
+                </span>
+              ) : null}
             </div>
             <div className="manual-row-actions">
-              <mark>{manual.status}</mark>
+              <mark>{manual.latestIngestionJob?.status ?? manual.status}</mark>
+              {manual.latestIngestionJob?.status === 'failed' ? (
+                manual.latestIngestionJob.canRetryIndexing && onRetry ? (
+                  <button
+                    type="button"
+                    className="btn-small"
+                    onClick={() => {
+                      const jobId = manual.latestIngestionJob?._id
+                      if (jobId) onRetry(jobId)
+                    }}
+                  >
+                    Retry indexing
+                  </button>
+                ) : (
+                  <span className="manual-action-note">Re-upload required</span>
+                )
+              ) : null}
               {onArchive && manual.status === 'active' ? (
                 <button
                   type="button"
