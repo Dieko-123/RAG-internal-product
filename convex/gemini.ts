@@ -1,6 +1,10 @@
 'use node'
 
-import { GoogleGenAI, UploadToFileSearchStoreOperation } from '@google/genai'
+import {
+  GoogleGenAI,
+  ImportFileOperation,
+  UploadToFileSearchStoreOperation,
+} from '@google/genai'
 import { v } from 'convex/values'
 import { internal } from './_generated/api'
 import type { Id } from './_generated/dataModel'
@@ -14,7 +18,7 @@ import {
 } from './fixtures/dummyManual'
 import { requireAdmin } from './permissions'
 
-const DEFAULT_MODEL = 'gemini-2.5-flash-lite'
+const DEFAULT_MODEL = 'gemini-2.5-flash'
 const REFUSAL = 'I could not find this in the manual.'
 const INDEXING_POLL_INTERVAL_MS = Number(process.env.INGESTION_POLL_INTERVAL_MS) || 5000
 const INDEXING_MAX_ATTEMPTS = Number(process.env.INGESTION_MAX_POLL_ATTEMPTS) || 240
@@ -29,7 +33,18 @@ type Citation = {
   pageNumber?: number
   excerpt?: string
   fileSearchStore?: string
+  sourceFileName?: string
+  providerUri?: string
 }
+
+type GeminiCustomMetadata = Array<{
+  key: string
+  stringValue: string
+}>
+
+type FileSearchIngestionOperation =
+  | UploadToFileSearchStoreOperation
+  | ImportFileOperation
 
 type ActiveManual = {
   manual: {
@@ -86,26 +101,41 @@ export const ingestDummyManual = action({
     const admin = await requireAdmin(ctx)
     const apiKey = readRequiredEnv('GEMINI_API_KEY')
     const ai = new GoogleGenAI({ apiKey })
+
+    const orgId = await getOrgIdForUser(ctx)
+
     const manualId: Id<'manuals'> = await ctx.runMutation(
       internal.manuals.internalCreateManualIfMissing,
       {
         title: DUMMY_MANUAL_TITLE,
         slug: DUMMY_MANUAL_SLUG,
         actorTokenIdentifier: admin.tokenIdentifier,
+        visibility: 'org',
       },
     )
 
     let manualVersionId: Id<'manualVersions'> | null = null
 
     try {
-      const fileSearchStore = await ai.fileSearchStores.create({
-        config: {
-          displayName: `${DUMMY_MANUAL_TITLE} ${Date.now()}`,
-        },
-      })
+      const existingStoreName: string | null = await ctx.runQuery(
+        internal.users.internalGetOrgStoreName,
+        { organizationId: orgId },
+      )
 
-      if (!fileSearchStore.name) {
-        throw new Error('Gemini did not return a File Search store name.')
+      let storeName: string
+      if (existingStoreName) {
+        storeName = existingStoreName
+      } else {
+        const newStore = await ai.fileSearchStores.create({
+          config: { displayName: `org-store-${orgId}` },
+        })
+        if (!newStore.name) {
+          throw new Error('Gemini did not return a File Search store name.')
+        }
+        storeName = await ctx.runMutation(
+          internal.users.internalGetOrCreateOrgStore,
+          { organizationId: orgId, geminiFileSearchStoreName: newStore.name },
+        )
       }
 
       manualVersionId = await ctx.runMutation(
@@ -115,36 +145,49 @@ export const ingestDummyManual = action({
           versionLabel: 'v1',
           sourceFileName: DUMMY_MANUAL_FILE_NAME,
           provider: 'gemini_file_search',
-          geminiFileSearchStoreName: fileSearchStore.name,
+          providerMode: 'shared_org_store',
+          geminiFileSearchStoreName: storeName,
           mimeType: 'text/plain',
           sizeBytes: DUMMY_MANUAL_CONTENT.length,
           status: 'indexing',
           actorTokenIdentifier: admin.tokenIdentifier,
+          visibility: 'org',
         },
       )
+      const createdManualVersionId = manualVersionId
 
-      let operation = await ai.fileSearchStores.uploadToFileSearchStore({
-        fileSearchStoreName: fileSearchStore.name,
+      const imported = await importBlobIntoSharedStore(ai, {
+        storeName,
         file: new Blob([DUMMY_MANUAL_CONTENT], { type: 'text/plain' }),
-        config: {
-          displayName: DUMMY_MANUAL_FILE_NAME,
-          mimeType: 'text/plain',
-          customMetadata: [
-            { key: 'manual_slug', stringValue: DUMMY_MANUAL_SLUG },
-            { key: 'manual_version', stringValue: 'v1' },
-          ],
-        },
+        displayName: DUMMY_MANUAL_FILE_NAME,
+        mimeType: 'text/plain',
+        customMetadata: [
+          { key: 'organizationId', stringValue: orgId },
+          { key: 'organization_id', stringValue: orgId },
+          { key: 'visibility', stringValue: 'org' },
+          { key: 'departmentId', stringValue: 'org' },
+          { key: 'department_id', stringValue: 'org' },
+          { key: 'manualId', stringValue: manualId },
+          { key: 'manual_id', stringValue: manualId },
+          { key: 'manualVersionId', stringValue: createdManualVersionId },
+          { key: 'manual_version_id', stringValue: createdManualVersionId },
+          { key: 'status', stringValue: 'active' },
+        ],
       })
 
-      operation = await waitForOperation(ai, operation)
+      const operation = await waitForOperation(ai, imported.operation)
 
-      const documentName = extractStringField(operation.response, 'documentName')
-      const fileName = extractStringField(operation.response, 'fileName')
+      const documentName = normalizeGeminiDocumentName(
+        storeName,
+        extractStringField(operation.response, 'documentName'),
+      )
+      const fileName = imported.fileName
 
       await ctx.runMutation(internal.manuals.internalMarkManualVersionActive, {
         manualId,
         manualVersionId,
         geminiFileSearchDocumentName: documentName,
+        geminiFileSearchStoreName: storeName,
         geminiFileName: fileName,
       })
 
@@ -155,7 +198,7 @@ export const ingestDummyManual = action({
         targetId: manualId,
         metadata: {
           manualVersionId,
-          geminiFileSearchStoreName: fileSearchStore.name,
+          geminiFileSearchStoreName: storeName,
           geminiFileSearchDocumentName: documentName ?? '',
           geminiFileName: fileName ?? '',
         },
@@ -169,7 +212,7 @@ export const ingestDummyManual = action({
         manualId,
         manualVersionId,
         status: 'active',
-        geminiFileSearchStoreName: fileSearchStore.name,
+        geminiFileSearchStoreName: storeName,
         geminiFileSearchDocumentName: documentName,
         geminiFileName: fileName,
       }
@@ -378,6 +421,7 @@ export const internalRunIngestionJob = internalAction({
       const customMetadata = isSharedStore
         ? [
             { key: 'organizationId', stringValue: job.organizationId },
+            { key: 'organization_id', stringValue: job.organizationId },
             { key: 'visibility', stringValue: manualVersion.visibility ?? 'org' },
             {
               key: 'departmentId',
@@ -386,8 +430,17 @@ export const internalRunIngestionJob = internalAction({
                   ? manualVersion.departmentId
                   : 'org',
             },
+            {
+              key: 'department_id',
+              stringValue:
+                manualVersion.visibility === 'department' && manualVersion.departmentId
+                  ? manualVersion.departmentId
+                  : 'org',
+            },
             { key: 'manualId', stringValue: manual._id },
+            { key: 'manual_id', stringValue: manual._id },
             { key: 'manualVersionId', stringValue: manualVersion._id },
+            { key: 'manual_version_id', stringValue: manualVersion._id },
             { key: 'status', stringValue: 'active' },
           ]
         : [
@@ -396,23 +449,41 @@ export const internalRunIngestionJob = internalAction({
             { key: 'source_file_name', stringValue: manualVersion.sourceFileName },
           ]
 
-      const operation = await ai.fileSearchStores.uploadToFileSearchStore({
-        fileSearchStoreName: storeName,
-        file: fileBlob,
-        config: {
-          displayName: manualVersion.sourceFileName,
-          mimeType: manualVersion.mimeType,
-          customMetadata,
-        },
-      })
-      const documentName = extractStringField(operation.response, 'documentName')
-      const fileName = extractStringField(operation.response, 'fileName')
+      const imported = isSharedStore
+        ? await importBlobIntoSharedStore(ai, {
+            storeName,
+            file: fileBlob,
+            displayName: manualVersion.sourceFileName,
+            mimeType: manualVersion.mimeType,
+            customMetadata,
+          })
+        : {
+            operation: await ai.fileSearchStores.uploadToFileSearchStore({
+              fileSearchStoreName: storeName,
+              file: fileBlob,
+              config: {
+                displayName: manualVersion.sourceFileName,
+                mimeType: manualVersion.mimeType,
+                customMetadata,
+              },
+            }),
+            fileName: undefined,
+          }
+      const operation = imported.operation
+      const documentName = normalizeGeminiDocumentName(
+        storeName,
+        extractStringField(operation.response, 'documentName'),
+      )
+      const fileName = imported.fileName ?? extractStringField(operation.response, 'fileName')
       const nextPollAt = Date.now() + INDEXING_POLL_INTERVAL_MS
 
       await ctx.runMutation(internal.ingestionJobs.internalMarkIndexing, {
         ingestionJobId: job._id,
         manualVersionId: manualVersion._id,
         geminiOperationName: operation.name,
+        geminiOperationKind: isSharedStore
+          ? 'import_file'
+          : 'upload_to_file_search_store',
         geminiFileSearchStoreName: storeName,
         geminiDocumentName: documentName,
         geminiFileName: fileName,
@@ -504,25 +575,36 @@ export const internalPollIngestionJob = internalAction({
     try {
       const apiKey = readRequiredEnv('GEMINI_API_KEY')
       const ai = new GoogleGenAI({ apiKey })
-      const operationRequest = new UploadToFileSearchStoreOperation()
-      operationRequest.name = job.geminiOperationName
-      const operation = (await ai.operations.get({
-        operation: operationRequest,
-      })) as unknown as UploadToFileSearchStoreOperation
+      const operationKind =
+        job.geminiOperationKind ??
+        (manualVersion.providerMode === 'shared_org_store'
+          ? 'import_file'
+          : 'upload_to_file_search_store')
+      const operation = await getFileSearchOperation(ai, {
+        name: job.geminiOperationName,
+        kind: operationKind,
+      })
 
       if (operation.error) {
         throw new Error(`Gemini File Search indexing failed: ${JSON.stringify(operation.error)}`)
       }
 
       if (operation.done) {
+        const completedDocumentName = normalizeGeminiDocumentName(
+          job.geminiFileSearchStoreName ?? manualVersion.geminiFileSearchStoreName,
+          extractStringField(operation.response, 'documentName') ??
+            job.geminiDocumentName ??
+            manualVersion.geminiDocumentName,
+        )
+        if (!completedDocumentName) {
+          throw new Error('Gemini File Search import completed without a document name.')
+        }
+
         await ctx.runMutation(internal.ingestionJobs.internalMarkActive, {
           ingestionJobId: job._id,
           manualId: job.manualId,
           manualVersionId: job.manualVersionId,
-          geminiDocumentName:
-            extractStringField(operation.response, 'documentName') ??
-            job.geminiDocumentName ??
-            manualVersion.geminiDocumentName,
+          geminiDocumentName: completedDocumentName,
           geminiFileName:
             extractStringField(operation.response, 'fileName') ??
             job.geminiFileName ??
@@ -664,10 +746,16 @@ export const askManualQuestion = action({
     const citations = normalizeCitations(
       response.candidates?.[0]?.groundingMetadata,
     )
+    const normalizedCitations = citations.map((citation) => ({
+      ...citation,
+      title: activeManual.version.sourceFileName,
+      sourceFileName: activeManual.version.sourceFileName,
+      providerUri: citation.providerUri ?? citation.uri,
+    }))
     const rawText = response.text?.trim() ?? ''
-    const refusal = shouldRefuse(rawText, citations)
+    const refusal = shouldRefuse(rawText)
     const answerText = refusal ? REFUSAL : rawText
-    const answerCitations = refusal ? [] : citations
+    const answerCitations = refusal ? [] : normalizedCitations
 
     const questionId = await ctx.runMutation(
       internal.manuals.internalLogQuestion,
@@ -755,6 +843,81 @@ type MultiManualQuestionResult = {
   }>
   latencyMs: number
   model: string
+}
+
+type DebugProbeResult = {
+  label: string
+  metadataFilter: string | null
+  ok: boolean
+  errorMessage?: string
+  rawAnswerPreview: string
+  rawAnswerPresent: boolean
+  refusal: boolean
+  groundingChunksCount: number
+  citationsCount: number
+  sourceHints: Array<{
+    title?: string
+    uri?: string
+    textPreview?: string
+  }>
+}
+
+type RetrievalDebugState = {
+  organization: {
+    _id: Id<'organizations'>
+    geminiFileSearchStoreNamePresent: boolean
+    geminiFileSearchStoreName: string | null
+    geminiFilterMode: 'or_syntax' | 'multi_entry' | null
+  }
+  manual: {
+    _id: Id<'manuals'>
+    title: string
+    slug: string
+    status: string
+    organizationId: Id<'organizations'>
+    visibility: 'org' | 'department' | 'restricted'
+    departmentId: Id<'departments'> | null
+    currentVersionId: Id<'manualVersions'> | null
+  }
+  manualVersion: {
+    _id: Id<'manualVersions'>
+    status: string
+    providerMode: string
+    sourceFileName: string
+    organizationId: Id<'organizations'>
+    visibility: 'org' | 'department' | 'restricted'
+    departmentId: Id<'departments'> | null
+    geminiFileSearchStoreNamePresent: boolean
+    geminiFileSearchStoreName: string | null
+    geminiDocumentName: string | null
+    geminiFileName: string | null
+    geminiDocumentNamePresent: boolean
+    geminiFileNamePresent: boolean
+  }
+  latestJob: {
+    _id: Id<'ingestionJobs'>
+    status: string
+    lastError: string | null
+    geminiOperationNamePresent: boolean
+    geminiOperationKind: 'upload_to_file_search_store' | 'import_file' | null
+    geminiFileSearchStoreNamePresent: boolean
+    geminiDocumentNamePresent: boolean
+    geminiFileNamePresent: boolean
+    storageDeletedAt: number | null
+    attempts: number
+    maxAttempts: number
+  } | null
+}
+
+type DebugGeminiRetrievalResult = {
+  safeState: unknown
+  scopeDebug: unknown
+  filterDebug: unknown
+  probes: DebugProbeResult[]
+  providerStoreProbe: unknown
+  providerDocumentProbe: unknown
+  productionPostProcessing: unknown
+  interpretation: string
 }
 
 export const askMultiManualQuestion = action({
@@ -933,9 +1096,16 @@ export const askMultiManualQuestion = action({
       scopeData.effective,
     )
     const rawText = response.text?.trim() ?? ''
-    const refusal = shouldRefuse(rawText, rawCitations)
+    const refusal = shouldRefuse(rawText)
     const answerText = refusal ? REFUSAL : rawText
     const answerCitations = refusal ? [] : rawCitations
+    const citationWarning =
+      !refusal && rawCitations.length === 0
+        ? 'The answer was generated but no citation could be matched to a manual source.'
+        : undefined
+    const combinedWarning = warning && citationWarning
+      ? `${warning} ${citationWarning}`
+      : (warning ?? citationWarning)
 
     const effectiveManualIds = scopeData.effective.map((v) => v.manualId as string)
     const effectiveManualVersionIds = scopeData.effective.map(
@@ -950,7 +1120,7 @@ export const askMultiManualQuestion = action({
       answerText,
       refusal,
       citations: answerCitations,
-      warning,
+      warning: combinedWarning,
       model,
       latencyMs,
       sourceFileName: scopeData.effective.map((v) => v.sourceFileName).join(', '),
@@ -973,12 +1143,268 @@ export const askMultiManualQuestion = action({
       answerText,
       refusal,
       citations: answerCitations,
-      warning,
+      warning: combinedWarning,
       effectiveManualIds,
       effectiveManualVersionIds,
       excludedManuals: scopeData.excluded.length > 0 ? scopeData.excluded : undefined,
       latencyMs,
       model,
+    }
+  },
+})
+
+export const debugGeminiRetrievalForManual = action({
+  args: {
+    manualId: v.optional(v.id('manuals')),
+    manualVersionId: v.optional(v.id('manualVersions')),
+    testQuestion: v.string(),
+    model: v.optional(v.string()),
+  },
+  handler: async (ctx, args): Promise<DebugGeminiRetrievalResult> => {
+    const admin = await requireAdmin(ctx)
+    const question = args.testQuestion.trim()
+    if (!question) {
+      throw new Error('Test question is required.')
+    }
+    if (!args.manualId && !args.manualVersionId) {
+      throw new Error('Provide manualId or manualVersionId.')
+    }
+
+    const debugState: RetrievalDebugState = await ctx.runQuery(
+      internal.manuals.internalGetRetrievalDebugState,
+      {
+        manualId: args.manualId,
+        manualVersionId: args.manualVersionId,
+      },
+    )
+
+    const scopeData: {
+      effective: EffectiveVersion[]
+      excluded: Array<{
+        manualId: string
+        manualVersionId: string
+        title?: string
+        reason: string
+      }>
+      organizationId: Id<'organizations'>
+      orgStoreName?: string
+    } = await ctx.runQuery(internal.manuals.internalGetManualVersionsForScope, {
+      manualVersionIds: [debugState.manualVersion._id],
+      userTokenIdentifier: admin.tokenIdentifier,
+    })
+
+    const storeName =
+      debugState.manualVersion.providerMode === 'shared_org_store'
+        ? debugState.organization.geminiFileSearchStoreName
+        : debugState.manualVersion.geminiFileSearchStoreName
+
+    const effectiveVersion = scopeData.effective[0] ?? {
+      manualId: debugState.manual._id,
+      manualVersionId: debugState.manualVersion._id,
+      title: debugState.manual.title,
+      sourceFileName: debugState.manualVersion.sourceFileName,
+      providerMode: debugState.manualVersion.providerMode,
+    }
+
+    const model = args.model?.trim() || process.env.GEMINI_DEFAULT_MODEL?.trim() || DEFAULT_MODEL
+    const apiKey = readRequiredEnv('GEMINI_API_KEY')
+    const ai = new GoogleGenAI({ apiKey })
+    const cachedFilterMode = debugState.organization.geminiFilterMode
+    const orFilter = buildOrSyntaxMetadataFilter([effectiveVersion])
+    const legacyCamelFilter = `manualVersionId="${effectiveVersion.manualVersionId}"`
+    const unquotedFilter = `manualVersionId=${effectiveVersion.manualVersionId}`
+    const multiEntryFilters = buildMultiEntryMetadataFilters([effectiveVersion])
+    const productionFilterMode =
+      cachedFilterMode === 'multi_entry' ? 'multi_entry' : 'or_syntax'
+
+    const probes: DebugProbeResult[] = []
+    const providerStoreProbe = storeName
+      ? await runProviderStoreProbe(
+          ai,
+          storeName,
+          normalizeGeminiDocumentName(
+            storeName,
+            debugState.manualVersion.geminiDocumentName ?? undefined,
+          ) ?? null,
+        )
+      : {
+          ok: false,
+          errorMessage: 'No File Search store name is available for this provider mode.',
+          storeNamePresent: false,
+        }
+    const providerDocumentProbe = await runProviderDocumentProbe(
+      ai,
+      normalizeGeminiDocumentName(
+        storeName ?? undefined,
+        debugState.manualVersion.geminiDocumentName ?? undefined,
+      ) ?? null,
+      {
+        manualId: debugState.manual._id,
+        manualVersionId: debugState.manualVersion._id,
+        organizationId: debugState.manual.organizationId,
+      },
+    )
+
+    if (!storeName) {
+      probes.push({
+        label: 'store-unavailable',
+        metadataFilter: null,
+        ok: false,
+        errorMessage: 'No File Search store name is available for this provider mode.',
+        rawAnswerPreview: '',
+        rawAnswerPresent: false,
+        refusal: true,
+        groundingChunksCount: 0,
+        citationsCount: 0,
+        sourceHints: [],
+      })
+    } else {
+      probes.push(
+        await runGeminiRetrievalProbe({
+          ai,
+          model,
+          question,
+          storeName,
+          label: 'A: shared/selected store without metadataFilter',
+          metadataFilter: null,
+          versions: [effectiveVersion],
+        }),
+      )
+      probes.push(
+        await runGeminiRetrievalProbe({
+          ai,
+          model,
+          question,
+          storeName,
+          label: 'B0: legacy camelCase manualVersionId metadataFilter',
+          metadataFilter: legacyCamelFilter,
+          versions: [effectiveVersion],
+        }),
+      )
+      probes.push(
+        await runGeminiRetrievalProbe({
+          ai,
+          model,
+          question,
+          storeName,
+          label: 'B2: unquoted manualVersionId metadataFilter',
+          metadataFilter: unquotedFilter,
+          versions: [effectiveVersion],
+        }),
+      )
+      probes.push(
+        await runGeminiRetrievalProbe({
+          ai,
+          model,
+          question,
+          storeName,
+          label: 'B: simple manualVersionId metadataFilter',
+          metadataFilter: orFilter,
+          versions: [effectiveVersion],
+        }),
+      )
+      probes.push(
+        await runGeminiRetrievalProbe({
+          ai,
+          model,
+          question,
+          storeName,
+          label: `C: production filter mode (${productionFilterMode})`,
+          metadataFilter:
+            productionFilterMode === 'multi_entry' ? multiEntryFilters : orFilter,
+          versions: [effectiveVersion],
+        }),
+      )
+      probes.push(
+        await runGeminiRetrievalProbe({
+          ai,
+          model,
+          question,
+          storeName,
+          label:
+            productionFilterMode === 'multi_entry'
+              ? 'D: alternate or_syntax filter mode'
+              : 'D: alternate multi_entry filter mode',
+          metadataFilter:
+            productionFilterMode === 'multi_entry' ? orFilter : multiEntryFilters,
+          versions: [effectiveVersion],
+        }),
+      )
+    }
+
+    const productionProbe = probes.find((probe) =>
+      probe.label.startsWith('C:'),
+    )
+
+    return {
+      safeState: {
+        manualId: debugState.manual._id,
+        manualTitle: debugState.manual.title,
+        manualStatus: debugState.manual.status,
+        manualOrganizationId: debugState.manual.organizationId,
+        manualVisibility: debugState.manual.visibility,
+        manualDepartmentId: debugState.manual.departmentId,
+        manualVersionId: debugState.manualVersion._id,
+        manualVersionStatus: debugState.manualVersion.status,
+        providerMode: debugState.manualVersion.providerMode,
+        manualVersionStorePresent:
+          debugState.manualVersion.geminiFileSearchStoreNamePresent,
+        manualVersionDocumentPresent:
+          debugState.manualVersion.geminiDocumentNamePresent,
+        manualVersionFilePresent: debugState.manualVersion.geminiFileNamePresent,
+        organizationStorePresent:
+          debugState.organization.geminiFileSearchStoreNamePresent,
+        latestIngestionJob: debugState.latestJob
+          ? {
+              status: debugState.latestJob.status,
+              lastError: debugState.latestJob.lastError,
+              geminiOperationNamePresent:
+                debugState.latestJob.geminiOperationNamePresent,
+              geminiOperationKind: debugState.latestJob.geminiOperationKind,
+              geminiFileSearchStoreNamePresent:
+                debugState.latestJob.geminiFileSearchStoreNamePresent,
+              geminiDocumentNamePresent:
+                debugState.latestJob.geminiDocumentNamePresent,
+              geminiFileNamePresent: debugState.latestJob.geminiFileNamePresent,
+              storageDeletedAt: debugState.latestJob.storageDeletedAt,
+              attempts: debugState.latestJob.attempts,
+              maxAttempts: debugState.latestJob.maxAttempts,
+            }
+          : null,
+      },
+      scopeDebug: {
+        selectedManualIds: [debugState.manual._id],
+        lockedSelectedManualVersionIds: [debugState.manualVersion._id],
+        effectiveManualVersionIds: scopeData.effective.map(
+          (v) => v.manualVersionId,
+        ),
+        effectiveManualIds: scopeData.effective.map((v) => v.manualId),
+        excludedManuals: scopeData.excluded,
+      },
+      filterDebug: {
+        cachedFilterMode,
+        productionFilterMode,
+        orSyntaxMetadataFilter: orFilter,
+        legacyCamelMetadataFilter: legacyCamelFilter,
+        unquotedMetadataFilter: unquotedFilter,
+        multiEntryMetadataFilters: multiEntryFilters,
+      },
+      probes,
+      providerStoreProbe,
+      providerDocumentProbe,
+      productionPostProcessing: productionProbe
+        ? {
+            rawAnswerPresent: productionProbe.rawAnswerPresent,
+            rawAnswerPreview: productionProbe.rawAnswerPreview,
+            shouldRefuseResult: productionProbe.refusal,
+            finalAnswerPreview: productionProbe.refusal
+              ? REFUSAL
+              : productionProbe.rawAnswerPreview,
+            citationsCount: productionProbe.citationsCount,
+            groundingChunksCount: productionProbe.groundingChunksCount,
+          }
+        : null,
+      interpretation: interpretRetrievalProbes(probes),
     }
   },
 })
@@ -1012,13 +1438,7 @@ async function callGeminiOrSyntax(
   storeName: string,
   versions: EffectiveVersion[],
 ) {
-  const filterParts = versions.map(
-    (v) => `manualVersionId="${v.manualVersionId}"`,
-  )
-  const metadataFilter =
-    filterParts.length === 1
-      ? filterParts[0]
-      : filterParts.join(' OR ')
+  const metadataFilter = buildOrSyntaxMetadataFilter(versions)
 
   return await ai.models.generateContent({
     model,
@@ -1045,10 +1465,10 @@ async function callGeminiMultiEntry(
   storeName: string,
   versions: EffectiveVersion[],
 ) {
-  const tools = versions.map((v) => ({
+  const tools = buildMultiEntryMetadataFilters(versions).map((metadataFilter) => ({
     fileSearch: {
       fileSearchStoreNames: [storeName],
-      metadataFilter: `manualVersionId="${v.manualVersionId}"`,
+      metadataFilter,
     },
   }))
 
@@ -1061,6 +1481,315 @@ async function callGeminiMultiEntry(
       tools,
     },
   })
+}
+
+function buildOrSyntaxMetadataFilter(versions: EffectiveVersion[]): string {
+  const filterParts = versions.map(
+    (v) => `manual_version_id="${v.manualVersionId}"`,
+  )
+  return filterParts.length === 1
+    ? filterParts[0]
+    : filterParts.join(' OR ')
+}
+
+function buildMultiEntryMetadataFilters(versions: EffectiveVersion[]): string[] {
+  return versions.map((v) => `manual_version_id="${v.manualVersionId}"`)
+}
+
+async function runProviderStoreProbe(
+  ai: GoogleGenAI,
+  storeName: string,
+  expectedDocumentName: string | null,
+) {
+  try {
+    const store = await ai.fileSearchStores.get({ name: storeName })
+    const record = isRecord(store) ? store : {}
+    const listedDocuments = []
+    let expectedDocumentListed = false
+    const documents = await ai.fileSearchStores.documents.list({
+      parent: storeName,
+      config: { pageSize: 20 },
+    })
+
+    for await (const document of documents) {
+      const doc = isRecord(document) ? document : {}
+      const name = getString(doc.name) ?? ''
+      if (expectedDocumentName && name === expectedDocumentName) {
+        expectedDocumentListed = true
+      }
+      listedDocuments.push({
+        nameMatchesExpected: Boolean(expectedDocumentName && name === expectedDocumentName),
+        displayName: getString(doc.displayName) ?? null,
+        state: getString(doc.state) ?? null,
+        metadataKeys: Array.isArray(doc.customMetadata)
+          ? doc.customMetadata
+              .map((entry) => isRecord(entry) ? getString(entry.key) : undefined)
+              .filter((key): key is string => Boolean(key))
+          : [],
+      })
+      if (listedDocuments.length >= 20) break
+    }
+
+    return {
+      ok: true,
+      storeNamePresent: true,
+      displayName: getString(record.displayName) ?? null,
+      activeDocumentsCount: getNumber(record.activeDocumentsCount) ?? null,
+      pendingDocumentsCount: getNumber(record.pendingDocumentsCount) ?? null,
+      failedDocumentsCount: getNumber(record.failedDocumentsCount) ?? null,
+      embeddingModel: getString(record.embeddingModel) ?? null,
+      expectedDocumentListed,
+      listedDocuments,
+      keys: Object.keys(record).sort(),
+    }
+  } catch (error) {
+    return {
+      ok: false,
+      storeNamePresent: true,
+      errorMessage:
+        error instanceof Error ? error.message : 'Unknown provider store probe error',
+    }
+  }
+}
+
+async function runProviderDocumentProbe(
+  ai: GoogleGenAI,
+  documentName: string | null,
+  expectedMetadata?: {
+    manualId: Id<'manuals'>
+    manualVersionId: Id<'manualVersions'>
+    organizationId: Id<'organizations'>
+  },
+) {
+  if (!documentName) {
+    return {
+      ok: false,
+      errorMessage: 'No Gemini document name is stored for this manual version.',
+      documentNamePresent: false,
+    }
+  }
+
+  try {
+    const document = await ai.fileSearchStores.documents.get({ name: documentName })
+    const doc = isRecord(document) ? document : {}
+    const metadata = Array.isArray(doc.customMetadata)
+      ? doc.customMetadata
+          .map((entry) => {
+            if (!isRecord(entry)) return null
+            const key = getString(entry.key)
+            if (!key) return null
+            const value = getString(entry.stringValue)
+            return {
+              key,
+              value:
+                key === 'status' ||
+                key === 'visibility' ||
+                key === 'departmentId'
+                  ? value
+                  : value
+                    ? '[redacted]'
+                    : undefined,
+            }
+          })
+          .filter((entry): entry is NonNullable<typeof entry> => entry !== null)
+      : []
+    const metadataMatches = expectedMetadata && Array.isArray(doc.customMetadata)
+      ? {
+          organizationId: metadataValueMatches(
+            doc.customMetadata,
+            'organizationId',
+            expectedMetadata.organizationId,
+          ),
+          organization_id: metadataValueMatches(
+            doc.customMetadata,
+            'organization_id',
+            expectedMetadata.organizationId,
+          ),
+          manualId: metadataValueMatches(
+            doc.customMetadata,
+            'manualId',
+            expectedMetadata.manualId,
+          ),
+          manual_id: metadataValueMatches(
+            doc.customMetadata,
+            'manual_id',
+            expectedMetadata.manualId,
+          ),
+          manualVersionId: metadataValueMatches(
+            doc.customMetadata,
+            'manualVersionId',
+            expectedMetadata.manualVersionId,
+          ),
+          manual_version_id: metadataValueMatches(
+            doc.customMetadata,
+            'manual_version_id',
+            expectedMetadata.manualVersionId,
+          ),
+        }
+      : null
+
+    return {
+      ok: true,
+      documentNamePresent: true,
+      providerState:
+        getString(doc.state) ??
+        getString(doc.status) ??
+        getString(doc.documentStatus) ??
+        null,
+      displayName: getString(doc.displayName) ?? null,
+      sizeBytes: getNumber(doc.sizeBytes) ?? null,
+      metadataMatches,
+      metadata,
+      keys: Object.keys(doc).sort(),
+    }
+  } catch (error) {
+    return {
+      ok: false,
+      documentNamePresent: true,
+      errorMessage:
+        error instanceof Error ? error.message : 'Unknown provider document probe error',
+    }
+  }
+}
+
+function metadataValueMatches(
+  metadata: unknown[],
+  key: string,
+  expectedValue: string,
+): boolean {
+  for (const entry of metadata) {
+    if (!isRecord(entry)) continue
+    if (getString(entry.key) !== key) continue
+    return getString(entry.stringValue) === expectedValue
+  }
+  return false
+}
+
+function normalizeGeminiDocumentName(
+  storeName: string | undefined,
+  documentName: string | undefined,
+): string | undefined {
+  if (!documentName) return undefined
+  if (documentName.startsWith('fileSearchStores/')) return documentName
+  if (!storeName) return documentName
+  return `${storeName}/documents/${documentName}`
+}
+
+async function runGeminiRetrievalProbe(args: {
+  ai: GoogleGenAI
+  model: string
+  question: string
+  storeName: string
+  label: string
+  metadataFilter: string | string[] | null
+  versions: EffectiveVersion[]
+}): Promise<DebugProbeResult> {
+  try {
+    const tools = Array.isArray(args.metadataFilter)
+      ? args.metadataFilter.map((metadataFilter) => ({
+          fileSearch: {
+            fileSearchStoreNames: [args.storeName],
+            metadataFilter,
+          },
+        }))
+      : [
+          {
+            fileSearch: args.metadataFilter
+              ? {
+                  fileSearchStoreNames: [args.storeName],
+                  metadataFilter: args.metadataFilter,
+                }
+              : {
+                  fileSearchStoreNames: [args.storeName],
+                },
+          },
+        ]
+
+    const response = await args.ai.models.generateContent({
+      model: args.model,
+      contents: args.question,
+      config: {
+        systemInstruction: MANUAL_ONLY_INSTRUCTION,
+        temperature: 0,
+        tools,
+      },
+    })
+
+    const rawAnswer = response.text?.trim() ?? ''
+    const groundingMetadata = response.candidates?.[0]?.groundingMetadata
+    const citations = normalizeMultiManualCitations(groundingMetadata, args.versions)
+    const sourceHints = getGroundingSourceHints(groundingMetadata)
+
+    return {
+      label: args.label,
+      metadataFilter: Array.isArray(args.metadataFilter)
+        ? args.metadataFilter.join(' | ')
+        : args.metadataFilter,
+      ok: true,
+      rawAnswerPreview: truncate(rawAnswer, 600) ?? '',
+      rawAnswerPresent: rawAnswer.length > 0,
+      refusal: shouldRefuse(rawAnswer),
+      groundingChunksCount: sourceHints.length,
+      citationsCount: citations.length,
+      sourceHints,
+    }
+  } catch (error) {
+    return {
+      label: args.label,
+      metadataFilter: Array.isArray(args.metadataFilter)
+        ? args.metadataFilter.join(' | ')
+        : args.metadataFilter,
+      ok: false,
+      errorMessage: error instanceof Error ? error.message : 'Unknown Gemini probe error',
+      rawAnswerPreview: '',
+      rawAnswerPresent: false,
+      refusal: true,
+      groundingChunksCount: 0,
+      citationsCount: 0,
+      sourceHints: [],
+    }
+  }
+}
+
+function getGroundingSourceHints(
+  groundingMetadata: unknown,
+): DebugProbeResult['sourceHints'] {
+  if (!isRecord(groundingMetadata)) return []
+  const chunks = groundingMetadata.groundingChunks
+  if (!Array.isArray(chunks)) return []
+
+  return chunks
+    .map((chunk) => {
+      if (!isRecord(chunk) || !isRecord(chunk.retrievedContext)) return null
+      const rc = chunk.retrievedContext
+      return {
+        title: getString(rc.title),
+        uri: truncate(getString(rc.uri), 160),
+        textPreview: truncate(getString(rc.text), 220),
+      }
+    })
+    .filter((hint): hint is NonNullable<typeof hint> => hint !== null)
+    .slice(0, 5)
+}
+
+function interpretRetrievalProbes(probes: DebugProbeResult[]): string {
+  const noFilter = probes.find((probe) => probe.label.startsWith('A:'))
+  const simpleFilter = probes.find((probe) => probe.label.startsWith('B:'))
+  const production = probes.find((probe) => probe.label.startsWith('C:'))
+
+  if (!noFilter?.ok) {
+    return 'Probe A failed: the store/tool call failed before metadata filtering. Check ingestion, indexing status, store name, or Gemini File Search tool configuration.'
+  }
+  if (noFilter.refusal || noFilter.groundingChunksCount === 0) {
+    return 'Probe A returned no grounded answer: Gemini is not retrieving chunks even without metadata filtering. Check whether the document was indexed into the selected store.'
+  }
+  if (!simpleFilter?.ok || simpleFilter.refusal || simpleFilter.groundingChunksCount === 0) {
+    return 'Probe A succeeded but Probe B failed: the manualVersionId metadata filter likely does not match uploaded document metadata or the filter syntax is wrong.'
+  }
+  if (!production?.ok || production.refusal || production.groundingChunksCount === 0) {
+    return 'Probe B succeeded but production mode failed: the production filter mode, scope resolution, or post-processing path is the likely bug.'
+  }
+  return 'Retrieval probes found grounded answers. If the UI still refuses, inspect frontend display or chat-session scope selection.'
 }
 
 function buildExcludedWarning(
@@ -1119,11 +1848,19 @@ function normalizeMultiManualCitations(
   const chunks = groundingMetadata.groundingChunks
   if (!Array.isArray(chunks)) return []
 
+  // Keys are ordered by specificity: geminiFileName/geminiDocumentName are unique
+  // provider IDs; sourceFileName is a user-controlled string that may collide across
+  // manuals (e.g. two uploads both named "manual.pdf"), so it is only added when
+  // no more specific key already covers this version.
   const versionLookup = new Map<string, EffectiveVersion>()
   for (const v of versions) {
     if (v.geminiFileName) versionLookup.set(v.geminiFileName, v)
     if (v.geminiDocumentName) versionLookup.set(v.geminiDocumentName, v)
-    if (v.sourceFileName) versionLookup.set(v.sourceFileName, v)
+  }
+  for (const v of versions) {
+    if (v.sourceFileName && !versionLookup.has(v.sourceFileName)) {
+      versionLookup.set(v.sourceFileName, v)
+    }
   }
 
   return chunks
@@ -1137,16 +1874,20 @@ function normalizeMultiManualCitations(
       const pageNumber = getNumber(rc.pageNumber)
 
       let matched: EffectiveVersion | undefined
-      if (uri) {
-        matched = versionLookup.get(uri)
+      const providerValues = [uri, title].filter(
+        (value): value is string => Boolean(value),
+      )
+      for (const providerValue of providerValues) {
+        matched = versionLookup.get(providerValue)
         if (!matched) {
           for (const [key, ver] of versionLookup) {
-            if (uri.includes(key) || key.includes(uri)) {
+            if (providerValue.includes(key) || key.includes(providerValue)) {
               matched = ver
               break
             }
           }
         }
+        if (matched) break
       }
       if (!matched && title) {
         for (const ver of versions) {
@@ -1158,7 +1899,7 @@ function normalizeMultiManualCitations(
       }
 
       return {
-        title: matched?.title ?? title ?? 'Unknown source',
+        title: matched?.sourceFileName ?? title ?? 'Unknown source',
         manualId: matched?.manualId as string | undefined,
         manualVersionId: matched?.manualVersionId as string | undefined,
         sourceFileName: matched?.sourceFileName,
@@ -1171,10 +1912,71 @@ function normalizeMultiManualCitations(
     .slice(0, 10)
 }
 
+async function importBlobIntoSharedStore(
+  ai: GoogleGenAI,
+  args: {
+    storeName: string
+    file: Blob
+    displayName: string
+    mimeType?: string
+    customMetadata: GeminiCustomMetadata
+  },
+): Promise<{
+  operation: ImportFileOperation
+  fileName: string
+}> {
+  const uploadedFile = await ai.files.upload({
+    file: args.file,
+    config: {
+      displayName: args.displayName,
+      mimeType: args.mimeType,
+    },
+  })
+
+  if (!uploadedFile.name) {
+    throw new Error('Gemini Files API did not return a file name.')
+  }
+
+  const operation = await ai.fileSearchStores.importFile({
+    fileSearchStoreName: args.storeName,
+    fileName: uploadedFile.name,
+    config: {
+      customMetadata: args.customMetadata,
+    },
+  })
+
+  return {
+    operation,
+    fileName: uploadedFile.name,
+  }
+}
+
+async function getFileSearchOperation(
+  ai: GoogleGenAI,
+  args: {
+    name: string
+    kind: 'upload_to_file_search_store' | 'import_file'
+  },
+): Promise<FileSearchIngestionOperation> {
+  if (args.kind === 'import_file') {
+    const operationRequest = new ImportFileOperation()
+    operationRequest.name = args.name
+    return (await ai.operations.get({
+      operation: operationRequest,
+    })) as ImportFileOperation
+  }
+
+  const operationRequest = new UploadToFileSearchStoreOperation()
+  operationRequest.name = args.name
+  return (await ai.operations.get({
+    operation: operationRequest,
+  })) as UploadToFileSearchStoreOperation
+}
+
 async function waitForOperation(
   ai: GoogleGenAI,
-  operation: UploadToFileSearchStoreOperation,
-): Promise<UploadToFileSearchStoreOperation> {
+  operation: FileSearchIngestionOperation,
+): Promise<FileSearchIngestionOperation> {
   let current = operation
 
   for (let attempts = 0; attempts < INDEXING_MAX_ATTEMPTS; attempts += 1) {
@@ -1186,9 +1988,16 @@ async function waitForOperation(
     }
 
     await new Promise((resolve) => setTimeout(resolve, INDEXING_POLL_INTERVAL_MS))
-    current = (await ai.operations.get({
-      operation: current,
-    })) as unknown as UploadToFileSearchStoreOperation
+    if (!current.name) {
+      throw new Error('Gemini File Search operation did not include an operation name.')
+    }
+
+    current = await getFileSearchOperation(ai, {
+      name: current.name,
+      kind: current instanceof ImportFileOperation
+        ? 'import_file'
+        : 'upload_to_file_search_store',
+    })
   }
 
   throw new Error(
@@ -1220,14 +2029,15 @@ function normalizeCitations(groundingMetadata: unknown): Citation[] {
     .slice(0, 5)
 }
 
-function shouldRefuse(answerText: string, citations: Citation[]): boolean {
+function shouldRefuse(answerText: string): boolean {
   const normalized = answerText.trim()
   if (!normalized) return true
   if (normalized === REFUSAL) return true
-  if (/\b(could not|cannot|can't|not able to)\s+find\b/i.test(normalized)) {
+  if (/^I could not find this in the manual\.?$/i.test(normalized)) return true
+  if (/\b(could not|cannot|can't|not able to)\s+find\s+(this|that|it|the answer|an answer|information|any information)\b/i.test(normalized)) {
     return true
   }
-  return citations.length === 0
+  return false
 }
 
 function readRequiredEnv(name: string): string {

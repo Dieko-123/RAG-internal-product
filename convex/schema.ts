@@ -158,6 +158,12 @@ export default defineSchema({
     maxAttempts: v.number(),
     nextPollAt: v.optional(v.number()),
     geminiOperationName: v.optional(v.string()),
+    geminiOperationKind: v.optional(
+      v.union(
+        v.literal('upload_to_file_search_store'),
+        v.literal('import_file'),
+      ),
+    ),
     geminiFileSearchStoreName: v.optional(v.string()),
     geminiDocumentName: v.optional(v.string()),
     geminiFileName: v.optional(v.string()),

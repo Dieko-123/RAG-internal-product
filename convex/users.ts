@@ -162,7 +162,7 @@ export const listExistingUsersForAdmin = query({
   handler: async (ctx) => {
     await requireOrgAdmin(ctx)
 
-    return await ctx.db.query('users').withIndex('by_email').take(100)
+    return await ctx.db.query('users').withIndex('by_email').collect()
   },
 })
 
