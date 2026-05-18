@@ -482,7 +482,9 @@ type SelectableManual = {
   departmentName?: string
 }
 
-const MAX_SELECTED_MANUALS = 5
+const MAX_SELECTED_MANUALS = 30
+// TODO: Long-term UX should support document collections/folders so users can
+// select a folder instead of 30 individual PDFs.
 
 function ChatWorkspace({
   selectedChatId,
@@ -776,35 +778,92 @@ function DocumentsWorkspace({
     api.manuals.listSelectableManuals,
     canQuery ? {} : 'skip',
   )
-  const manualsList: SelectableManual[] = selectableManuals ?? []
-  const selectableManualLimit = Math.min(manualsList.length, MAX_SELECTED_MANUALS)
-  const eligibleManualIds = manualsList
-    .slice(0, MAX_SELECTED_MANUALS)
-    .map((manual) => manual._id)
-  const selectedManuals = manualsList.filter((manual) =>
-    selectedManualIds.includes(manual._id),
+  const [manualSearch, setManualSearch] = useState('')
+  const manualsList: SelectableManual[] = useMemo(
+    () => selectableManuals ?? [],
+    [selectableManuals],
   )
-  const allEligibleManualsSelected =
-    eligibleManualIds.length > 0 &&
-    eligibleManualIds.every((manualId) => selectedManualIds.includes(manualId))
-  const hasMoreThanSelectableLimit = manualsList.length > MAX_SELECTED_MANUALS
+
+  const filteredManuals = useMemo(() => {
+    const q = manualSearch.trim().toLowerCase()
+    if (!q) return manualsList
+    return manualsList.filter(
+      (m) =>
+        m.title.toLowerCase().includes(q) ||
+        (m.departmentName ?? '').toLowerCase().includes(q),
+    )
+  }, [manualsList, manualSearch])
+
+  const orgManuals = useMemo(
+    () => filteredManuals.filter((m) => m.visibility !== 'department'),
+    [filteredManuals],
+  )
+  const deptManuals = useMemo(
+    () => filteredManuals.filter((m) => m.visibility === 'department'),
+    [filteredManuals],
+  )
+
+  const selectedManuals = manualsList.filter((m) => selectedManualIds.includes(m._id))
+  const selectedCount = selectedManuals.length
+  const atCap = selectedCount >= MAX_SELECTED_MANUALS
+
+  const visibleIds = filteredManuals.map((m) => m._id)
+  const visibleUnselectedCount = visibleIds.filter(
+    (id) => !selectedManualIds.includes(id),
+  ).length
+  const canSelectAllVisible = visibleUnselectedCount > 0 && !atCap
 
   function toggleManual(manualId: ManualId) {
     onSelectedManualIdsChange(
       selectedManualIds.includes(manualId)
         ? selectedManualIds.filter((id) => id !== manualId)
-        : selectedManualIds.length >= MAX_SELECTED_MANUALS
+        : atCap
           ? selectedManualIds
           : [...selectedManualIds, manualId],
     )
   }
 
-  function selectAllEligibleManuals() {
-    onSelectedManualIdsChange(eligibleManualIds)
+  function selectAllVisible() {
+    const toAdd = visibleIds.filter((id) => !selectedManualIds.includes(id))
+    const slots = MAX_SELECTED_MANUALS - selectedCount
+    const adding = toAdd.slice(0, slots)
+    onSelectedManualIdsChange([...selectedManualIds, ...adding])
   }
 
   function clearSelectedManuals() {
     onSelectedManualIdsChange([])
+  }
+
+  function renderManualGroup(label: string, items: SelectableManual[]) {
+    if (items.length === 0) return null
+    return (
+      <div className="manual-group" key={label}>
+        <div className="manual-group-label">{label}</div>
+        {items.map((manual) => {
+          const isChecked = selectedManualIds.includes(manual._id)
+          const isDisabled = !isChecked && atCap
+          return (
+            <label
+              className={`manual-checkbox${isChecked ? ' checked' : ''}${isDisabled ? ' disabled' : ''}`}
+              key={manual._id}
+            >
+              <input
+                type="checkbox"
+                checked={isChecked}
+                disabled={isDisabled}
+                onChange={() => toggleManual(manual._id)}
+              />
+              <span className="manual-checkbox-title">{manual.title}</span>
+              <span className="manual-checkbox-meta">
+                {manual.visibility === 'department' && manual.departmentName
+                  ? manual.departmentName
+                  : 'Org-wide'}
+              </span>
+            </label>
+          )
+        })}
+      </div>
+    )
   }
 
   return (
@@ -818,7 +877,9 @@ function DocumentsWorkspace({
         <section className="document-selection-panel" aria-label="Manuals selected for chat">
           <div>
             <h2>Chat sources</h2>
-            <p>Choose up to {MAX_SELECTED_MANUALS} active manuals for the next new chat.</p>
+            <p>
+              {selectedCount} / {MAX_SELECTED_MANUALS} selected
+            </p>
           </div>
           {selectableManuals === undefined ? (
             <span className="history-empty">Loading manuals...</span>
@@ -830,64 +891,56 @@ function DocumentsWorkspace({
                 <button
                   type="button"
                   className="btn"
-                  disabled={allEligibleManualsSelected}
-                  onClick={selectAllEligibleManuals}
+                  disabled={!canSelectAllVisible}
+                  onClick={selectAllVisible}
+                  title={atCap ? `Cap of ${MAX_SELECTED_MANUALS} reached` : undefined}
                 >
-                  {hasMoreThanSelectableLimit ? `Select first ${MAX_SELECTED_MANUALS}` : 'Select all'}
+                  Select all visible
                 </button>
                 <button
                   type="button"
                   className="btn"
-                  disabled={selectedManualIds.length === 0}
+                  disabled={selectedCount === 0}
                   onClick={clearSelectedManuals}
                 >
-                  Clear
+                  Clear selection
                 </button>
               </div>
-              {hasMoreThanSelectableLimit ? (
-                <p className="document-selection-note">
-                  Phase 2A supports up to {MAX_SELECTED_MANUALS} manuals per chat.
-                  Select first {MAX_SELECTED_MANUALS} chooses the first eligible manuals in this list.
+              <input
+                type="search"
+                className="manual-search-input"
+                placeholder="Filter manuals…"
+                value={manualSearch}
+                onChange={(e) => setManualSearch(e.target.value)}
+                aria-label="Filter manuals"
+              />
+              {atCap ? (
+                <p className="document-selection-note document-selection-cap-notice">
+                  {MAX_SELECTED_MANUALS} manuals selected — deselect some to add others.
                 </p>
               ) : null}
               <div className="manual-selector document-manual-selector">
-                {manualsList.map((manual) => {
-                  const isChecked = selectedManualIds.includes(manual._id)
-                  const isDisabled =
-                    !isChecked && selectedManualIds.length >= MAX_SELECTED_MANUALS
-                  return (
-                    <label
-                      className={`manual-checkbox${isChecked ? ' checked' : ''}${isDisabled ? ' disabled' : ''}`}
-                      key={manual._id}
-                    >
-                      <input
-                        type="checkbox"
-                        checked={isChecked}
-                        disabled={isDisabled}
-                        onChange={() => toggleManual(manual._id)}
-                      />
-                      <span className="manual-checkbox-title">{manual.title}</span>
-                      <span className="manual-checkbox-meta">
-                        {manual.visibility === 'department' && manual.departmentName
-                          ? manual.departmentName
-                          : manual.visibility}
-                      </span>
-                    </label>
-                  )
-                })}
+                {filteredManuals.length === 0 ? (
+                  <span className="history-empty">No manuals match filter</span>
+                ) : (
+                  <>
+                    {renderManualGroup('Org-wide', orgManuals)}
+                    {renderManualGroup('Department', deptManuals)}
+                  </>
+                )}
               </div>
             </>
           )}
           <div className="document-selection-footer">
             <span>
-              {selectedManuals.length === 0
+              {selectedCount === 0
                 ? 'No manuals selected'
-                : `${selectedManuals.length} of ${selectableManualLimit} selected: ${selectedManuals.map((m) => m.title).join(', ')}`}
+                : `${selectedCount} / ${MAX_SELECTED_MANUALS} selected`}
             </span>
             <button
               type="button"
               className="btn btn-primary"
-              disabled={selectedManuals.length === 0}
+              disabled={selectedCount === 0}
               onClick={onStartChat}
             >
               Ask with selected

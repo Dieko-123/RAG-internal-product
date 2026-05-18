@@ -951,8 +951,8 @@ export const askMultiManualQuestion = action({
       if (!args.selectedManualIds || args.selectedManualIds.length === 0) {
         throw new Error('Select at least one manual.')
       }
-      if (args.selectedManualIds.length > 5) {
-        throw new Error('Select at most 5 manuals.')
+      if (args.selectedManualIds.length > 30) {
+        throw new Error('Select at most 30 manuals.')
       }
 
       const orgId = await getOrgIdForUser(ctx)
@@ -1055,6 +1055,15 @@ export const askMultiManualQuestion = action({
     let response: Awaited<ReturnType<typeof ai.models.generateContent>>
     let usedFilterMode: 'or_syntax' | 'multi_entry'
 
+    // multi_entry sends one tool entry per manual; cap at 20 to avoid exceeding
+    // Gemini's tool-list limits until broader counts are validated.
+    const MULTI_ENTRY_MAX = 20
+    if (cachedFilterMode === 'multi_entry' && scopeData.effective.length > MULTI_ENTRY_MAX) {
+      throw new Error(
+        `Please select fewer manuals for this query. Multi-entry filter mode supports at most ${MULTI_ENTRY_MAX} manuals.`,
+      )
+    }
+
     if (cachedFilterMode === 'multi_entry') {
       response = await callGeminiMultiEntry(ai, model, question, storeName, scopeData.effective)
       usedFilterMode = 'multi_entry'
@@ -1072,6 +1081,12 @@ export const askMultiManualQuestion = action({
       } catch (orError) {
         const errorMessage = orError instanceof Error ? orError.message : ''
         if (isFilterSyntaxError(errorMessage)) {
+          if (scopeData.effective.length > MULTI_ENTRY_MAX) {
+            throw new Error(
+              `Please select fewer manuals for this query. Multi-entry filter mode supports at most ${MULTI_ENTRY_MAX} manuals.`,
+              { cause: orError },
+            )
+          }
           try {
             response = await callGeminiMultiEntry(ai, model, question, storeName, scopeData.effective)
             usedFilterMode = 'multi_entry'

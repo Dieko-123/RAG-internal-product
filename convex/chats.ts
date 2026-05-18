@@ -258,8 +258,8 @@ export const internalLockChatScope = internalMutation({
   handler: async (ctx, args) => {
     const deduped = [...new Set(args.selectedManualIds)]
 
-    if (deduped.length < 1 || deduped.length > 5) {
-      throw new Error('Select between 1 and 5 manuals.')
+    if (deduped.length < 1 || deduped.length > 30) {
+      throw new Error('Select between 1 and 30 manuals.')
     }
 
     const org = await ctx.db.get(args.organizationId)
