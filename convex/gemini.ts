@@ -1168,6 +1168,64 @@ export const askMultiManualQuestion = action({
   },
 })
 
+const TITLE_GENERATION_PROMPT = (question: string, answer: string) => `Create a short sidebar title for this chat.
+
+Rules:
+- 3 to 6 words
+- clear and specific
+- no quotes
+- no markdown
+- no trailing punctuation
+- title case
+- do not include the words "chat" or "manual"
+- describe the user's actual topic
+- return only the title
+
+User question:
+${question}
+
+Assistant answer:
+${answer}`
+
+export const internalGenerateChatTitle = internalAction({
+  args: {
+    chatSessionId: v.id('chatSessions'),
+    question: v.string(),
+    answerText: v.string(),
+  },
+  handler: async (ctx, args) => {
+    try {
+      const apiKey = process.env.GEMINI_API_KEY?.trim()
+      if (!apiKey) return
+
+      const model =
+        process.env.CHAT_TITLE_MODEL?.trim() || 'gemini-2.5-flash-lite'
+
+      const ai = new GoogleGenAI({ apiKey })
+      const prompt = TITLE_GENERATION_PROMPT(
+        args.question.slice(0, 600),
+        args.answerText.slice(0, 800),
+      )
+
+      const response = await ai.models.generateContent({
+        model,
+        contents: prompt,
+        config: { temperature: 0.4, maxOutputTokens: 32 },
+      })
+
+      const raw = response.text?.trim() ?? ''
+      if (raw) {
+        await ctx.runMutation(internal.chats.internalUpdateChatTitle, {
+          chatSessionId: args.chatSessionId,
+          title: raw,
+        })
+      }
+    } catch {
+      // Title generation failure must never surface to the user.
+    }
+  },
+})
+
 export const debugGeminiRetrievalForManual = action({
   args: {
     manualId: v.optional(v.id('manuals')),

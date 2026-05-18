@@ -1,5 +1,6 @@
 import { v } from 'convex/values'
 import { internalMutation, internalQuery, mutation, query } from './_generated/server'
+import { internal } from './_generated/api'
 import type { MutationCtx } from './_generated/server'
 import type { Id } from './_generated/dataModel'
 import {
@@ -241,6 +242,14 @@ export const internalRecordChatExchange = internalMutation({
         : { updatedAt: now },
     )
 
+    if (shouldRetitle && !args.refusal) {
+      await ctx.scheduler.runAfter(0, internal.gemini.internalGenerateChatTitle, {
+        chatSessionId,
+        question: args.question,
+        answerText: args.answerText,
+      })
+    }
+
     return {
       chatSessionId,
       assistantMessageId,
@@ -463,9 +472,50 @@ export const internalRecordMultiManualExchange = internalMutation({
         : { updatedAt: now },
     )
 
+    if (shouldRetitle && !args.refusal) {
+      await ctx.scheduler.runAfter(0, internal.gemini.internalGenerateChatTitle, {
+        chatSessionId: args.chatSessionId,
+        question: args.question,
+        answerText: args.answerText,
+      })
+    }
+
     return { chatSessionId: args.chatSessionId }
   },
 })
+
+export const internalUpdateChatTitle = internalMutation({
+  args: {
+    chatSessionId: v.id('chatSessions'),
+    title: v.string(),
+  },
+  handler: async (ctx, args) => {
+    const session = await ctx.db.get(args.chatSessionId)
+    if (!session) return
+
+    const isTitleGenerated = isGeneratedTitle(session.title)
+    if (!isTitleGenerated) return
+
+    const cleaned = cleanGeneratedTitle(args.title)
+    if (!cleaned) return
+
+    await ctx.db.patch(args.chatSessionId, { title: cleaned, updatedAt: Date.now() })
+  },
+})
+
+function isGeneratedTitle(title: string): boolean {
+  if (!title || title === 'New chat') return true
+  // Deterministic fallback titles are short (≤34 chars) plain word strings — treat
+  // them as replaceable so AI-generated titles can improve them.
+  return title.length <= 34
+}
+
+function cleanGeneratedTitle(raw: string): string {
+  const firstLine = raw.split('\n').map((l) => l.trim()).find((l) => l.length > 0) ?? ''
+  const stripped = firstLine.replace(/^["']|["']$/g, '').replace(/[.,;:!?]+$/, '').trim()
+  if (stripped.length < 3 || stripped.length > 60) return ''
+  return stripped
+}
 
 async function getActiveManualRecord(ctx: MutationCtx) {
   const organization = await getDefaultOrganization(ctx)
