@@ -2,6 +2,7 @@ import {
   Component,
   useEffect,
   useMemo,
+  useRef,
   useState,
   type ErrorInfo,
   type ReactNode,
@@ -47,6 +48,7 @@ type ChatSession = {
   manualId: ManualId
   title: string
   pinned?: boolean
+  manualTitles?: string[]
 }
 
 type Department = {
@@ -199,6 +201,7 @@ function SignedInShell() {
   const [view, setView] = useState<View>('chat')
   const [sidebarCollapsed, setSidebarCollapsed] = useState(false)
   const [selectedChatId, setSelectedChatId] = useState<ChatSessionId | null>(null)
+  const [selectedManualIds, setSelectedManualIds] = useState<ManualId[]>([])
   const [accessState, setAccessState] = useState<
     'idle' | 'checking' | 'ready' | 'denied'
   >('idle')
@@ -213,6 +216,7 @@ function SignedInShell() {
   const chatSessions = useQuery(api.chats.listChatSessions, protectedQueryArgs)
   const ensureCurrentUserAccess = useMutation(api.users.ensureCurrentUserAccess)
   const setChatPinned = useMutation(api.chats.setChatPinned)
+  const deleteChatMutation = useMutation(api.chats.deleteChat)
   const displayName = useMemo(() => {
     if (clerkUser) {
       return clerkUser.fullName ?? clerkUser.primaryEmailAddress?.emailAddress ?? 'User'
@@ -268,6 +272,11 @@ function SignedInShell() {
     setSelectedChatId(null)
   }
 
+  function openNewChatWithSelectedManuals() {
+    setSelectedChatId(null)
+    setView('chat')
+  }
+
   function openChat(session: ChatSession) {
     setView('chat')
     setSelectedChatId(session._id)
@@ -278,6 +287,13 @@ function SignedInShell() {
       chatSessionId: session._id,
       pinned: !session.pinned,
     })
+  }
+
+  function deleteChat(session: ChatSession) {
+    void deleteChatMutation({ chatSessionId: session._id })
+    if (selectedChatId === session._id) {
+      setSelectedChatId(null)
+    }
   }
 
   if (isAuthLoading || (isAuthenticated && currentUser === undefined)) {
@@ -407,6 +423,7 @@ function SignedInShell() {
                     selectedChatId={selectedChatId}
                     onOpenChat={openChat}
                     onTogglePinned={togglePinned}
+                    onDeleteChat={deleteChat}
                   />
                   <ChatSessionGroup
                     label="Recent"
@@ -414,6 +431,7 @@ function SignedInShell() {
                     selectedChatId={selectedChatId}
                     onOpenChat={openChat}
                     onTogglePinned={togglePinned}
+                    onDeleteChat={deleteChat}
                   />
                 </>
               )}
@@ -429,15 +447,26 @@ function SignedInShell() {
         </div>
       </aside>
 
-      <div className="main-panel">
+      <div className="main-panel" data-view={activeView}>
         {activeView === 'chat' ? (
           <ChatWorkspace
             selectedChatId={selectedChatId}
             onSelectChat={setSelectedChatId}
             canQuery={accessState === 'ready'}
+            selectedManualIds={selectedManualIds}
+            lockedManualTitles={
+              selectedChatId
+                ? ((chatSessions ?? []).find((s: ChatSession) => s._id === selectedChatId)?.manualTitles ?? null)
+                : null
+            }
           />
         ) : activeView === 'documents' ? (
-          <DocumentsWorkspace canQuery={accessState === 'ready'} />
+          <DocumentsWorkspace
+            canQuery={accessState === 'ready'}
+            selectedManualIds={selectedManualIds}
+            onSelectedManualIdsChange={setSelectedManualIds}
+            onStartChat={openNewChatWithSelectedManuals}
+          />
         ) : (
           <AdminWorkspace canQuery={accessState === 'ready'} isOrgAdmin={!!isAdmin || uploadInfo?.role === 'org_admin'} uploadInfo={uploadInfo} />
         )}
@@ -459,10 +488,14 @@ function ChatWorkspace({
   selectedChatId,
   onSelectChat,
   canQuery,
+  selectedManualIds,
+  lockedManualTitles,
 }: {
   selectedChatId: ChatSessionId | null
   onSelectChat: (chatSessionId: ChatSessionId | null) => void
   canQuery: boolean
+  selectedManualIds: ManualId[]
+  lockedManualTitles: string[] | null
 }) {
   const queryArgs = canQuery ? {} : 'skip'
   const selectableManuals = useQuery(api.manuals.listSelectableManuals, queryArgs)
@@ -479,7 +512,11 @@ function ChatWorkspace({
   const [isAsking, setIsAsking] = useState(false)
   const [pendingQuestion, setPendingQuestion] = useState<string | null>(null)
   const [error, setError] = useState<string | null>(null)
-  const [selectedManualIds, setSelectedManualIds] = useState<ManualId[]>([])
+  const messagesEndRef = useRef<HTMLDivElement>(null)
+
+  useEffect(() => {
+    messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' })
+  }, [messages, pendingQuestion])
 
   const scopeLocked = selectedChatId !== null
   const manualsList: SelectableManual[] = selectableManuals ?? []
@@ -487,17 +524,6 @@ function ChatWorkspace({
   const displayedMessages = messages ?? []
   const hasSelectedManuals = selectedManualIds.length > 0
   const selectedManualReady = !manualsLoading && (hasSelectedManuals || scopeLocked)
-
-  function toggleManual(manualId: ManualId) {
-    if (scopeLocked) return
-    setSelectedManualIds((prev) => {
-      if (prev.includes(manualId)) {
-        return prev.filter((id) => id !== manualId)
-      }
-      if (prev.length >= MAX_SELECTED_MANUALS) return prev
-      return [...prev, manualId]
-    })
-  }
 
   async function handleAsk() {
     const trimmedQuestion = question.trim()
@@ -535,59 +561,41 @@ function ChatWorkspace({
         <h1>Ask a question</h1>
         <p>
           {scopeLocked
-            ? 'Scope locked for this chat.'
+            ? lockedManualTitles && lockedManualTitles.length > 0
+              ? `Scope locked — ${lockedManualTitles.join(', ')}`
+              : 'Scope locked for this chat.'
             : hasSelectedManuals
               ? `Searching: ${selectedTitles.join(', ')}`
               : manualsLoading
                 ? 'Loading manuals...'
                 : manualsList.length > 0
-                  ? 'Select manuals to search'
+                  ? 'Choose manuals on the Documents page'
                   : 'No manuals available for search'}
         </p>
       </div>
 
-      <div className="connection-status">
+      <div className="connection-status chat-scope-status">
         <span className={selectedManualReady ? 'status-dot' : 'status-dot status-idle'} />
         {manualsLoading
           ? 'Loading manuals'
           : selectedManualReady
             ? scopeLocked
-              ? 'Scope locked'
+              ? lockedManualTitles && lockedManualTitles.length > 0
+                ? `Scope locked · ${lockedManualTitles.length} manual${lockedManualTitles.length !== 1 ? 's' : ''}`
+                : 'Scope locked'
               : `${selectedManualIds.length} manual${selectedManualIds.length !== 1 ? 's' : ''} selected`
-            : 'Select manuals'}
+            : 'No manuals selected'}
       </div>
-
-      {!scopeLocked && manualsList.length > 0 ? (
-        <div className="manual-selector" aria-label="Select manuals to search">
-          {manualsList.map((manual) => {
-            const isChecked = selectedManualIds.includes(manual._id)
-            const isDisabled = !isChecked && selectedManualIds.length >= MAX_SELECTED_MANUALS
-            return (
-              <label
-                className={`manual-checkbox${isChecked ? ' checked' : ''}${isDisabled ? ' disabled' : ''}`}
-                key={manual._id}
-              >
-                <input
-                  type="checkbox"
-                  checked={isChecked}
-                  disabled={isDisabled}
-                  onChange={() => toggleManual(manual._id)}
-                />
-                <span className="manual-checkbox-title">{manual.title}</span>
-                <span className="manual-checkbox-meta">
-                  {manual.visibility === 'department' && manual.departmentName
-                    ? manual.departmentName
-                    : manual.visibility}
-                </span>
-              </label>
-            )
-          })}
-        </div>
-      ) : null}
 
       {scopeLocked ? (
         <div className="scope-locked-notice">
-          Scope locked for this chat. Start a new chat to change manuals.
+          {lockedManualTitles && lockedManualTitles.length > 0
+            ? <>Searching: <strong>{lockedManualTitles.join(', ')}</strong>. Start a new chat to change manuals.</>
+            : 'Scope locked for this chat. Start a new chat to change manuals.'}
+        </div>
+      ) : !hasSelectedManuals && !manualsLoading && manualsList.length > 0 ? (
+        <div className="scope-locked-notice">
+          Select one or more manuals on the Documents page, then start a new chat.
         </div>
       ) : null}
 
@@ -599,7 +607,9 @@ function ChatWorkspace({
                 <circle cx="11" cy="11" r="8" />
                 <line x1="21" y1="21" x2="16.65" y2="16.65" />
               </svg>
-              Select manuals and ask a question
+              {scopeLocked || hasSelectedManuals
+                ? 'Ask a question'
+                : 'Select manuals on the Documents page'}
             </div>
           ) : (
             <>
@@ -626,7 +636,10 @@ function ChatWorkspace({
                         {message.sourceFileName ? ` / ${message.sourceFileName}` : ''}
                       </div>
                       {!message.refusal && message.citations && message.citations.length > 0 ? (
-                        <CitationList citations={message.citations} />
+                        <CitationList
+                          citations={message.citations}
+                          fallbackSourceFileName={message.sourceFileName}
+                        />
                       ) : null}
                     </>
                   ) : null}
@@ -640,6 +653,7 @@ function ChatWorkspace({
             </>
           )}
           {error ? <div className="inline-error">{error}</div> : null}
+          <div ref={messagesEndRef} />
         </div>
 
         <div className="composer">
@@ -688,6 +702,7 @@ function ChatWorkspace({
 
 function CitationList({
   citations,
+  fallbackSourceFileName,
 }: {
   citations: Array<{
     title?: string
@@ -698,12 +713,23 @@ function CitationList({
     manualVersionId?: string
     sourceFileName?: string
   }>
+  fallbackSourceFileName?: string
 }) {
   const grouped = useMemo(() => {
     const groups = new Map<string, { label: string; items: typeof citations }>()
     for (const citation of citations) {
-      const key = citation.manualVersionId ?? citation.manualId ?? citation.title ?? citation.sourceFileName ?? 'unknown'
-      const label = citation.title ?? citation.sourceFileName ?? 'Unknown source'
+      const label =
+        citation.sourceFileName ??
+        fallbackSourceFileName ??
+        citation.title ??
+        'Unknown source'
+      const key =
+        citation.manualVersionId ??
+        citation.manualId ??
+        citation.sourceFileName ??
+        fallbackSourceFileName ??
+        citation.title ??
+        'unknown'
       const existing = groups.get(key)
       if (existing) {
         existing.items.push(citation)
@@ -712,7 +738,7 @@ function CitationList({
       }
     }
     return groups
-  }, [citations])
+  }, [citations, fallbackSourceFileName])
 
   return (
     <div className="citations">
@@ -731,20 +757,146 @@ function CitationList({
   )
 }
 
-function DocumentsWorkspace({ canQuery }: { canQuery: boolean }) {
+function DocumentsWorkspace({
+  canQuery,
+  selectedManualIds,
+  onSelectedManualIdsChange,
+  onStartChat,
+}: {
+  canQuery: boolean
+  selectedManualIds: ManualId[]
+  onSelectedManualIdsChange: (manualIds: ManualId[]) => void
+  onStartChat: () => void
+}) {
   const manuals = useQuery(
     api.manuals.listManuals,
     canQuery ? {} : 'skip',
   )
+  const selectableManuals = useQuery(
+    api.manuals.listSelectableManuals,
+    canQuery ? {} : 'skip',
+  )
+  const manualsList: SelectableManual[] = selectableManuals ?? []
+  const selectableManualLimit = Math.min(manualsList.length, MAX_SELECTED_MANUALS)
+  const eligibleManualIds = manualsList
+    .slice(0, MAX_SELECTED_MANUALS)
+    .map((manual) => manual._id)
+  const selectedManuals = manualsList.filter((manual) =>
+    selectedManualIds.includes(manual._id),
+  )
+  const allEligibleManualsSelected =
+    eligibleManualIds.length > 0 &&
+    eligibleManualIds.every((manualId) => selectedManualIds.includes(manualId))
+  const hasMoreThanSelectableLimit = manualsList.length > MAX_SELECTED_MANUALS
+
+  function toggleManual(manualId: ManualId) {
+    onSelectedManualIdsChange(
+      selectedManualIds.includes(manualId)
+        ? selectedManualIds.filter((id) => id !== manualId)
+        : selectedManualIds.length >= MAX_SELECTED_MANUALS
+          ? selectedManualIds
+          : [...selectedManualIds, manualId],
+    )
+  }
+
+  function selectAllEligibleManuals() {
+    onSelectedManualIdsChange(eligibleManualIds)
+  }
+
+  function clearSelectedManuals() {
+    onSelectedManualIdsChange([])
+  }
 
   return (
     <>
       <div className="page-header">
         <h1>Documents</h1>
-        <p>Browse indexed manuals available to the assistant</p>
+        <p>Select manuals here, then ask questions in a new chat</p>
       </div>
 
-      <ManualStatusList manuals={manuals} />
+      <div className="documents-layout">
+        <section className="document-selection-panel" aria-label="Manuals selected for chat">
+          <div>
+            <h2>Chat sources</h2>
+            <p>Choose up to {MAX_SELECTED_MANUALS} active manuals for the next new chat.</p>
+          </div>
+          {selectableManuals === undefined ? (
+            <span className="history-empty">Loading manuals...</span>
+          ) : manualsList.length === 0 ? (
+            <span className="history-empty">No active manuals available</span>
+          ) : (
+            <>
+              <div className="document-selection-actions">
+                <button
+                  type="button"
+                  className="btn"
+                  disabled={allEligibleManualsSelected}
+                  onClick={selectAllEligibleManuals}
+                >
+                  {hasMoreThanSelectableLimit ? `Select first ${MAX_SELECTED_MANUALS}` : 'Select all'}
+                </button>
+                <button
+                  type="button"
+                  className="btn"
+                  disabled={selectedManualIds.length === 0}
+                  onClick={clearSelectedManuals}
+                >
+                  Clear
+                </button>
+              </div>
+              {hasMoreThanSelectableLimit ? (
+                <p className="document-selection-note">
+                  Phase 2A supports up to {MAX_SELECTED_MANUALS} manuals per chat.
+                  Select first {MAX_SELECTED_MANUALS} chooses the first eligible manuals in this list.
+                </p>
+              ) : null}
+              <div className="manual-selector document-manual-selector">
+                {manualsList.map((manual) => {
+                  const isChecked = selectedManualIds.includes(manual._id)
+                  const isDisabled =
+                    !isChecked && selectedManualIds.length >= MAX_SELECTED_MANUALS
+                  return (
+                    <label
+                      className={`manual-checkbox${isChecked ? ' checked' : ''}${isDisabled ? ' disabled' : ''}`}
+                      key={manual._id}
+                    >
+                      <input
+                        type="checkbox"
+                        checked={isChecked}
+                        disabled={isDisabled}
+                        onChange={() => toggleManual(manual._id)}
+                      />
+                      <span className="manual-checkbox-title">{manual.title}</span>
+                      <span className="manual-checkbox-meta">
+                        {manual.visibility === 'department' && manual.departmentName
+                          ? manual.departmentName
+                          : manual.visibility}
+                      </span>
+                    </label>
+                  )
+                })}
+              </div>
+            </>
+          )}
+          <div className="document-selection-footer">
+            <span>
+              {selectedManuals.length === 0
+                ? 'No manuals selected'
+                : `${selectedManuals.length} of ${selectableManualLimit} selected: ${selectedManuals.map((m) => m.title).join(', ')}`}
+            </span>
+            <button
+              type="button"
+              className="btn btn-primary"
+              disabled={selectedManuals.length === 0}
+              onClick={onStartChat}
+            >
+              Ask with selected
+            </button>
+          </div>
+        </section>
+
+        <ManualStatusList manuals={manuals} />
+      </div>
     </>
   )
 }
@@ -800,6 +952,8 @@ function AdminWorkspace({
       ? { departmentId: selectedDepartmentId }
       : 'skip',
   )
+  const debugState = useQuery(api.manuals.debugManualState, canQuery && isOrgAdmin ? {} : 'skip')
+  const [showDebug, setShowDebug] = useState(false)
   const ingestDummyManual = useAction(api.gemini.ingestDummyManual)
   const ingestUploadedManual = useAction(api.gemini.ingestUploadedManual)
   const retryIndexing = useAction(api.gemini.retryIndexing)
@@ -824,6 +978,17 @@ function AdminWorkspace({
   const [isInviting, setIsInviting] = useState(false)
   const effectiveInviteDepartmentId = inviteDepartmentId
     || (!isOrgAdmin && uploadInfo?.departments?.length === 1 ? uploadInfo.departments[0]._id : '')
+  const canUploadOrgWide = isOrgAdmin || uploadInfo?.role === 'org_admin'
+  const uploadDepartments = isOrgAdmin ? (departments ?? []) : (uploadInfo?.departments ?? [])
+  const fixedUploadDepartment = !canUploadOrgWide ? uploadDepartments[0] : undefined
+  const effectiveUploadVisibility = canUploadOrgWide ? uploadVisibility : 'department'
+  const effectiveUploadDepartmentId =
+    effectiveUploadVisibility === 'department'
+      ? uploadDepartmentId ||
+        (!canUploadOrgWide && fixedUploadDepartment
+          ? fixedUploadDepartment._id
+          : '')
+      : ''
 
   async function handleInviteUser() {
     const email = inviteEmail.trim()
@@ -889,7 +1054,12 @@ function AdminWorkspace({
     setError(null)
 
     try {
-      const uploadUrl = await generateManualUploadUrl({})
+      const uploadUrl = await generateManualUploadUrl({
+        visibility: effectiveUploadVisibility,
+        departmentId: effectiveUploadVisibility === 'department' && effectiveUploadDepartmentId
+          ? effectiveUploadDepartmentId
+          : undefined,
+      })
       const uploadResponse = await fetch(uploadUrl, {
         method: 'POST',
         headers: { 'Content-Type': selectedFile.type || 'application/octet-stream' },
@@ -910,9 +1080,9 @@ function AdminWorkspace({
         sourceFileName: selectedFile.name,
         mimeType: selectedFile.type || '',
         sizeBytes: selectedFile.size,
-        visibility: uploadVisibility,
-        departmentId: uploadVisibility === 'department' && uploadDepartmentId
-          ? uploadDepartmentId
+        visibility: effectiveUploadVisibility,
+        departmentId: effectiveUploadVisibility === 'department' && effectiveUploadDepartmentId
+          ? effectiveUploadDepartmentId
           : undefined,
       })
 
@@ -1022,30 +1192,37 @@ function AdminWorkspace({
           <label className="field-label">
             Visibility
             <select
-              value={uploadVisibility}
+              value={effectiveUploadVisibility}
               onChange={(event) => {
                 const v = event.target.value as 'org' | 'department'
                 setUploadVisibility(v)
                 if (v === 'org') setUploadDepartmentId('')
               }}
-              disabled={isUploading || (!isOrgAdmin && uploadInfo?.role !== 'org_admin')}
+              disabled={isUploading || !canUploadOrgWide}
             >
-              <option value="org">Organization-wide</option>
+              {canUploadOrgWide ? <option value="org">Organization-wide</option> : null}
               <option value="department">Department only</option>
             </select>
           </label>
-          {uploadVisibility === 'department' ? (
+          {effectiveUploadVisibility === 'department' && !canUploadOrgWide ? (
+            <label className="field-label">
+              Department
+              <div className="field-static">
+                {fixedUploadDepartment?.name ?? 'No department assigned'}
+              </div>
+            </label>
+          ) : effectiveUploadVisibility === 'department' ? (
             <label className="field-label">
               Department
               <select
-                value={uploadDepartmentId}
+                value={effectiveUploadDepartmentId}
                 onChange={(event) =>
                   setUploadDepartmentId(event.target.value as DepartmentId | '')
                 }
                 disabled={isUploading}
               >
                 <option value="">Select department</option>
-                {(isOrgAdmin ? (departments ?? []) : (uploadInfo?.departments ?? [])).map(
+                {uploadDepartments.map(
                   (dept: Department) => (
                     <option value={dept._id} key={dept._id}>
                       {dept.name}
@@ -1062,7 +1239,8 @@ function AdminWorkspace({
               !selectedFile ||
               isUploading ||
               isIngesting ||
-              (uploadVisibility === 'department' && !uploadDepartmentId)
+              (effectiveUploadVisibility === 'org' && !canUploadOrgWide) ||
+              (effectiveUploadVisibility === 'department' && !effectiveUploadDepartmentId)
             }
             onClick={() => void handleUploadManual()}
           >
@@ -1072,13 +1250,28 @@ function AdminWorkspace({
           <button
             type="button"
             className="btn"
-            disabled={isIngesting || isUploading}
+            disabled={isIngesting || isUploading || !canUploadOrgWide}
             onClick={() => void handleIngest()}
           >
             {isIngesting ? 'Indexing...' : 'Ingest dummy manual'}
           </button>
           {message ? <div className="inline-success">{message}</div> : null}
           {error ? <div className="inline-error">{error}</div> : null}
+          {isOrgAdmin ? (
+            <>
+              <div className="admin-divider">Debug</div>
+              <button
+                type="button"
+                className="btn"
+                onClick={() => setShowDebug((v) => !v)}
+              >
+                {showDebug ? 'Hide manual state' : 'Show manual state'}
+              </button>
+              {showDebug && debugState ? (
+                <pre className="debug-output">{JSON.stringify(debugState, null, 2)}</pre>
+              ) : null}
+            </>
+          ) : null}
         </section>
 
         <ManualStatusList
@@ -1641,12 +1834,14 @@ function ChatSessionGroup({
   selectedChatId,
   onOpenChat,
   onTogglePinned,
+  onDeleteChat,
 }: {
   label: string
   sessions: ChatSession[]
   selectedChatId: ChatSessionId | null
   onOpenChat: (session: ChatSession) => void
   onTogglePinned: (session: ChatSession) => void
+  onDeleteChat: (session: ChatSession) => void
 }) {
   if (sessions.length === 0) return null
 
@@ -1669,6 +1864,11 @@ function ChatSessionGroup({
             title={session.title || 'New chat'}
           >
             <span>{formatChatTitle(session.title)}</span>
+            {session.manualTitles && session.manualTitles.length > 0 ? (
+              <span className="history-scope">
+                {formatScopeLabel(session.manualTitles)}
+              </span>
+            ) : null}
           </button>
           <button
             type="button"
@@ -1683,6 +1883,24 @@ function ChatSessionGroup({
             <svg viewBox="0 0 24 24" fill={session.pinned ? 'currentColor' : 'none'} stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round">
               <path d="M12 17v5" />
               <path d="M8 3h8l-1 8 4 4v2H5v-2l4-4z" />
+            </svg>
+          </button>
+          <button
+            type="button"
+            className="delete-button"
+            aria-label="Delete chat"
+            title="Delete chat"
+            onClick={(event) => {
+              event.stopPropagation()
+              onDeleteChat(session)
+            }}
+          >
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round">
+              <polyline points="3 6 5 6 21 6" />
+              <path d="M19 6l-1 14H6L5 6" />
+              <path d="M10 11v6" />
+              <path d="M14 11v6" />
+              <path d="M9 6V4h6v2" />
             </svg>
           </button>
         </div>
@@ -1756,6 +1974,15 @@ function formatChatTitle(value: string | null | undefined): string {
     withoutQuestionPrefix.length < trimmed.length
 
   return wasTruncated ? `${normalized.replace(/[.,;:!?-]+$/, '')}...` : normalized
+}
+
+function formatScopeLabel(titles: string[]): string {
+  if (titles.length === 0) return ''
+  if (titles.length === 1) return titles[0]
+  const first = titles[0]
+  const rest = titles.length - 1
+  const candidate = `${first} + ${rest} document${rest !== 1 ? 's' : ''}`
+  return candidate.length <= 38 ? candidate : `${first.slice(0, 22)}… + ${rest} document${rest !== 1 ? 's' : ''}`
 }
 
 function BrandMark({ compact = false }: { compact?: boolean }) {

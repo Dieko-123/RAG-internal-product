@@ -26,7 +26,7 @@ export const listInvites = query({
           q.eq('organizationId', organization._id).eq('status', 'pending'),
         )
         .order('desc')
-        .take(100)
+        .collect()
     }
 
     const deptAdminIds = await getDepartmentAdminIds(ctx, organization._id, identity.tokenIdentifier)
@@ -38,7 +38,7 @@ export const listInvites = query({
         q.eq('organizationId', organization._id).eq('status', 'pending'),
       )
       .order('desc')
-      .take(100)
+      .collect()
 
     return allInvites.filter(
       (invite) => invite.departmentId && deptAdminIds.has(invite.departmentId),

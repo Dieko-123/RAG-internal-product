@@ -65,6 +65,12 @@ export const internalMarkIndexing = internalMutation({
     ingestionJobId: v.id('ingestionJobs'),
     manualVersionId: v.id('manualVersions'),
     geminiOperationName: v.optional(v.string()),
+    geminiOperationKind: v.optional(
+      v.union(
+        v.literal('upload_to_file_search_store'),
+        v.literal('import_file'),
+      ),
+    ),
     geminiFileSearchStoreName: v.string(),
     geminiDocumentName: v.optional(v.string()),
     geminiFileName: v.optional(v.string()),
@@ -76,6 +82,7 @@ export const internalMarkIndexing = internalMutation({
     await ctx.db.patch(args.ingestionJobId, {
       status: 'indexing',
       geminiOperationName: args.geminiOperationName,
+      geminiOperationKind: args.geminiOperationKind,
       geminiFileSearchStoreName: args.geminiFileSearchStoreName,
       geminiDocumentName: args.geminiDocumentName,
       geminiFileName: args.geminiFileName,
