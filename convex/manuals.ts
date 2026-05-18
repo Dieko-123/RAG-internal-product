@@ -1,11 +1,12 @@
 import { v } from 'convex/values'
 import { internalMutation, internalQuery, mutation, query } from './_generated/server'
-import type { Id } from './_generated/dataModel'
+import type { Doc, Id } from './_generated/dataModel'
 import type { QueryCtx } from './_generated/server'
 import {
   getDefaultOrganization,
   getOrCreateDefaultOrganization,
   isAdminIdentity,
+  requireManualUploadPermission,
   requireAllowedUser,
   requireOrgAdmin,
 } from './permissions'
@@ -24,6 +25,10 @@ const citationValidator = v.object({
   pageNumber: v.optional(v.number()),
   excerpt: v.optional(v.string()),
   fileSearchStore: v.optional(v.string()),
+  manualId: v.optional(v.string()),
+  manualVersionId: v.optional(v.string()),
+  sourceFileName: v.optional(v.string()),
+  providerUri: v.optional(v.string()),
 })
 
 // TODO: optimize ingestion job lookup when manual count grows (N+1 query)
@@ -32,15 +37,11 @@ export const listManuals = query({
   handler: async (ctx) => {
     const identity = await requireAllowedUser(ctx)
     const organization = await getDefaultOrganization(ctx)
-    const manuals = await ctx.db.query('manuals').withIndex('by_slug').take(50)
+    const manuals = organization
+      ? await collectOrganizationManuals(ctx, organization._id)
+      : await ctx.db.query('manuals').withIndex('by_slug').collect()
 
-    const orgManuals = organization
-      ? manuals.filter(
-          (manual) =>
-            manual.organizationId === undefined ||
-            manual.organizationId === organization._id,
-        )
-      : manuals
+    const orgManuals = manuals.sort((a, b) => b.updatedAt - a.updatedAt)
 
     const isOrgLevel = isAdminIdentity(identity) || (organization
       ? await isOrgAdminOrOwner(ctx, organization._id, identity.tokenIdentifier)
@@ -49,7 +50,7 @@ export const listManuals = query({
     let visibleManuals = orgManuals
     if (!isOrgLevel) {
       const userDeptIds = organization
-        ? await getUserDepartmentAdminIds(ctx, organization._id, identity.tokenIdentifier)
+        ? await getUserAccessibleDepartmentIds(ctx, organization._id, identity.tokenIdentifier)
         : new Set<string>()
 
       visibleManuals = orgManuals.filter((manual) => {
@@ -102,12 +103,9 @@ export const listSelectableManuals = query({
     const organization = await getDefaultOrganization(ctx)
     if (!organization) return []
 
-    const activeManuals = await ctx.db
-      .query('manuals')
-      .withIndex('by_organizationId_and_status', (q) =>
-        q.eq('organizationId', organization._id).eq('status', 'active'),
-      )
-      .take(50)
+    const activeManuals = (await collectOrganizationManuals(ctx, organization._id))
+      .filter((manual) => manual.status === 'active')
+      .sort((a, b) => b.updatedAt - a.updatedAt)
 
     const isOrgLevel =
       isAdminIdentity(identity) ||
@@ -163,6 +161,72 @@ export const getActiveManual = query({
     await requireAllowedUser(ctx)
 
     return await getActiveManualRecord(ctx)
+  },
+})
+
+// Admin-only debug query — safe fields only, no secrets or raw content.
+export const debugManualState = query({
+  args: {},
+  handler: async (ctx) => {
+    const { organizationId } = await requireOrgAdmin(ctx)
+    const organization = await ctx.db.get(organizationId)
+
+    const manuals = (await collectOrganizationManuals(ctx, organizationId))
+      .sort((a, b) => b.updatedAt - a.updatedAt)
+
+    const results = []
+    for (const manual of manuals) {
+      const version = manual.currentVersionId ? await ctx.db.get(manual.currentVersionId) : null
+      const jobs = await ctx.db
+        .query('ingestionJobs')
+        .withIndex('by_manualId', (q) => q.eq('manualId', manual._id))
+        .collect()
+      const latestJob = jobs.sort((a, b) => b.updatedAt - a.updatedAt)[0]
+
+      results.push({
+        manualId: manual._id,
+        title: manual.title,
+        slug: manual.slug,
+        status: manual.status,
+        visibility: manual.visibility ?? 'org',
+        organizationId: manual.organizationId,
+        departmentId: manual.departmentId ?? null,
+        currentVersionId: manual.currentVersionId ?? null,
+        version: version ? {
+          manualVersionId: version._id,
+          status: version.status,
+          providerMode: version.providerMode ?? 'legacy_per_manual_store',
+          sourceFileName: version.sourceFileName,
+          mimeType: version.mimeType ?? null,
+          sizeBytes: version.sizeBytes ?? null,
+          organizationId: version.organizationId ?? null,
+          departmentId: version.departmentId ?? null,
+          visibility: version.visibility ?? 'org',
+          geminiFileSearchStoreName: version.geminiFileSearchStoreName ?? null,
+          geminiDocumentNamePresent: Boolean(version.geminiDocumentName ?? version.geminiFileSearchDocumentName),
+          geminiFileNamePresent: Boolean(version.geminiFileName),
+        } : null,
+        latestJob: latestJob ? {
+          ingestionJobId: latestJob._id,
+          status: latestJob.status,
+          lastError: latestJob.lastError ?? null,
+          geminiOperationNamePresent: Boolean(latestJob.geminiOperationName),
+          geminiDocumentNamePresent: Boolean(latestJob.geminiDocumentName),
+          geminiFileNamePresent: Boolean(latestJob.geminiFileName),
+          geminiFileSearchStoreName: latestJob.geminiFileSearchStoreName ?? null,
+          storageDeletedAt: latestJob.storageDeletedAt ?? null,
+          attempts: latestJob.attempts,
+          maxAttempts: latestJob.maxAttempts,
+        } : null,
+      })
+    }
+
+    return {
+      organizationId,
+      orgStoreName: organization?.geminiFileSearchStoreName ?? null,
+      geminiFilterMode: organization?.geminiFilterMode ?? null,
+      manuals: results,
+    }
   },
 })
 
@@ -268,9 +332,15 @@ export const restoreManual = mutation({
 })
 
 export const generateManualUploadUrl = mutation({
-  args: {},
-  handler: async (ctx) => {
-    await requireOrgAdmin(ctx)
+  args: {
+    visibility: v.union(v.literal('org'), v.literal('department')),
+    departmentId: v.optional(v.id('departments')),
+  },
+  handler: async (ctx, args) => {
+    await requireManualUploadPermission(ctx, {
+      visibility: args.visibility,
+      departmentId: args.departmentId,
+    })
 
     return await ctx.storage.generateUploadUrl()
   },
@@ -672,6 +742,96 @@ export const internalGetManualVersionsForScope = internalQuery({
   },
 })
 
+export const internalGetRetrievalDebugState = internalQuery({
+  args: {
+    manualId: v.optional(v.id('manuals')),
+    manualVersionId: v.optional(v.id('manualVersions')),
+  },
+  handler: async (ctx, args) => {
+    const organization = await getDefaultOrganization(ctx)
+    if (!organization) {
+      throw new Error('Organization not configured.')
+    }
+
+    let manual = args.manualId ? await ctx.db.get(args.manualId) : null
+    let version = args.manualVersionId ? await ctx.db.get(args.manualVersionId) : null
+
+    if (!manual && version) {
+      manual = await ctx.db.get(version.manualId)
+    }
+
+    if (!manual) {
+      throw new Error('Manual not found.')
+    }
+
+    if (!version && manual.currentVersionId) {
+      version = await ctx.db.get(manual.currentVersionId)
+    }
+
+    if (!version) {
+      throw new Error('Manual version not found.')
+    }
+
+    const jobs = await ctx.db
+      .query('ingestionJobs')
+      .withIndex('by_manualVersionId', (q) => q.eq('manualVersionId', version._id))
+      .take(20)
+    const latestJob = jobs.sort((a, b) => b.updatedAt - a.updatedAt)[0] ?? null
+
+    return {
+      organization: {
+        _id: organization._id,
+        geminiFileSearchStoreNamePresent: Boolean(organization.geminiFileSearchStoreName),
+        geminiFileSearchStoreName: organization.geminiFileSearchStoreName ?? null,
+        geminiFilterMode: organization.geminiFilterMode ?? null,
+      },
+      manual: {
+        _id: manual._id,
+        title: manual.title,
+        slug: manual.slug,
+        status: manual.status,
+        organizationId: manual.organizationId ?? organization._id,
+        visibility: manual.visibility ?? 'org',
+        departmentId: manual.departmentId ?? null,
+        currentVersionId: manual.currentVersionId ?? null,
+      },
+      manualVersion: {
+        _id: version._id,
+        status: version.status,
+        providerMode: version.providerMode ?? 'legacy_per_manual_store',
+        sourceFileName: version.sourceFileName,
+        organizationId: version.organizationId ?? manual.organizationId ?? organization._id,
+        visibility: version.visibility ?? manual.visibility ?? 'org',
+        departmentId: version.departmentId ?? manual.departmentId ?? null,
+        geminiFileSearchStoreNamePresent: Boolean(version.geminiFileSearchStoreName),
+        geminiFileSearchStoreName: version.geminiFileSearchStoreName ?? null,
+        geminiDocumentName:
+          version.geminiDocumentName ?? version.geminiFileSearchDocumentName ?? null,
+        geminiFileName: version.geminiFileName ?? null,
+        geminiDocumentNamePresent: Boolean(
+          version.geminiDocumentName ?? version.geminiFileSearchDocumentName,
+        ),
+        geminiFileNamePresent: Boolean(version.geminiFileName),
+      },
+      latestJob: latestJob
+        ? {
+            _id: latestJob._id,
+            status: latestJob.status,
+            lastError: latestJob.lastError ?? null,
+            geminiOperationNamePresent: Boolean(latestJob.geminiOperationName),
+            geminiOperationKind: latestJob.geminiOperationKind ?? null,
+            geminiFileSearchStoreNamePresent: Boolean(latestJob.geminiFileSearchStoreName),
+            geminiDocumentNamePresent: Boolean(latestJob.geminiDocumentName),
+            geminiFileNamePresent: Boolean(latestJob.geminiFileName),
+            storageDeletedAt: latestJob.storageDeletedAt ?? null,
+            attempts: latestJob.attempts,
+            maxAttempts: latestJob.maxAttempts,
+          }
+        : null,
+    }
+  },
+})
+
 async function getActiveManualRecord(ctx: QueryCtx) {
   const organization = await getDefaultOrganization(ctx)
   const manual = await ctx.db
@@ -729,27 +889,20 @@ async function isOrgAdminOrOwner(
   )
 }
 
-async function getUserDepartmentAdminIds(
+async function collectOrganizationManuals(
   ctx: QueryCtx,
   organizationId: Id<'organizations'>,
-  tokenIdentifier: string,
-): Promise<Set<string>> {
-  const memberships = await ctx.db
-    .query('memberships')
-    .withIndex('by_organizationId_and_userTokenIdentifier', (q) =>
-      q
-        .eq('organizationId', organizationId)
-        .eq('userTokenIdentifier', tokenIdentifier),
-    )
+): Promise<Array<Doc<'manuals'>>> {
+  const currentManuals = await ctx.db
+    .query('manuals')
+    .withIndex('by_organizationId', (q) => q.eq('organizationId', organizationId))
+    .collect()
+  const legacyManuals = await ctx.db
+    .query('manuals')
+    .withIndex('by_organizationId', (q) => q.eq('organizationId', undefined))
     .collect()
 
-  const deptIds = new Set<string>()
-  for (const m of memberships) {
-    if (m.departmentId && m.role === 'department_admin') {
-      deptIds.add(m.departmentId)
-    }
-  }
-  return deptIds
+  return [...currentManuals, ...legacyManuals]
 }
 
 async function getUserAccessibleDepartmentIds(

@@ -13,6 +13,10 @@ const citationValidator = v.object({
   pageNumber: v.optional(v.number()),
   excerpt: v.optional(v.string()),
   fileSearchStore: v.optional(v.string()),
+  manualId: v.optional(v.string()),
+  manualVersionId: v.optional(v.string()),
+  sourceFileName: v.optional(v.string()),
+  providerUri: v.optional(v.string()),
 })
 
 export const listChatSessions = query({
@@ -41,7 +45,7 @@ export const listChatSessions = query({
     )
     const sessions = [...sessionsById.values()]
 
-    return sessions.sort((a, b) => {
+    const sorted = sessions.sort((a, b) => {
       if (Boolean(a.pinned) !== Boolean(b.pinned)) {
         return a.pinned ? -1 : 1
       }
@@ -51,6 +55,18 @@ export const listChatSessions = query({
 
       return bSortTime - aSortTime
     })
+
+    return await Promise.all(
+      sorted.map(async (session) => {
+        const manualIds =
+          session.selectedManualIds && session.selectedManualIds.length > 0
+            ? session.selectedManualIds
+            : [session.manualId]
+        const manuals = await Promise.all(manualIds.map((id) => ctx.db.get(id)))
+        const manualTitles = manuals.filter(Boolean).map((m) => m!.title)
+        return { ...session, manualTitles }
+      }),
+    )
   },
 })
 

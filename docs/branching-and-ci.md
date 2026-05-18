@@ -65,7 +65,7 @@ Convex environment variables stay in Convex:
 
 - `CLERK_JWT_ISSUER_DOMAIN`
 - `GEMINI_API_KEY`
-- `GEMINI_DEFAULT_MODEL=gemini-2.5-flash-lite`
+- `GEMINI_DEFAULT_MODEL=gemini-2.5-flash`
 - `APP_ADMIN_EMAILS`
 - `APP_ADMIN_TOKEN_IDENTIFIERS`
 - `APP_ALLOWED_EMAILS`
