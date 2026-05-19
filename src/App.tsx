@@ -1233,7 +1233,7 @@ function AdminWorkspace({
               <p>
                 Upload one controlled real-format manual for Gemini File Search.
               </p>
-              <span className="file-types">PDF, TXT, or MD up to 25 MB</span>
+              <span className="file-types">PDF, TXT, MD, or DOCX up to 25 MB</span>
               <input
                 type="file"
                 accept=".pdf,.txt,.md,.docx,application/pdf,text/plain,text/markdown,application/vnd.openxmlformats-officedocument.wordprocessingml.document"
