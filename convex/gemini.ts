@@ -20,6 +20,7 @@ import { requireAdmin } from './permissions'
 
 const DEFAULT_MODEL = 'gemini-2.5-flash'
 const REFUSAL = 'I could not find this in the manual.'
+const MANUAL_QA_MAX_OUTPUT_TOKENS = 1800
 const INDEXING_POLL_INTERVAL_MS = Number(process.env.INGESTION_POLL_INTERVAL_MS) || 5000
 const INDEXING_MAX_ATTEMPTS = Number(process.env.INGESTION_MAX_POLL_ATTEMPTS) || 240
 const UPLOAD_JOB_MAX_ATTEMPTS = Number(process.env.INGESTION_MAX_POLL_ATTEMPTS) || 240
@@ -33,6 +34,8 @@ type Citation = {
   pageNumber?: number
   excerpt?: string
   fileSearchStore?: string
+  manualId?: string
+  manualVersionId?: string
   sourceFileName?: string
   providerUri?: string
 }
@@ -746,7 +749,7 @@ export const askManualQuestion = action({
     const citations = normalizeCitations(
       response.candidates?.[0]?.groundingMetadata,
     )
-    const normalizedCitations = citations.map((citation) => ({
+    const normalizedCitations = citations.map((citation) => cleanCitation({
       ...citation,
       title: activeManual.version.sourceFileName,
       sourceFileName: activeManual.version.sourceFileName,
@@ -1143,7 +1146,19 @@ export const askMultiManualQuestion = action({
       (v) => v.manualVersionId as string,
     )
 
-    await ctx.runMutation(internal.chats.internalRecordMultiManualExchange, {
+    const recordArgs: {
+      chatSessionId: Id<'chatSessions'>
+      userTokenIdentifier: string
+      title: string
+      question: string
+      answerText: string
+      refusal: boolean
+      citations: typeof answerCitations
+      warning?: string
+      model: string
+      latencyMs: number
+      sourceFileName: string
+    } = {
       chatSessionId: chatSessionId!,
       userTokenIdentifier: user.tokenIdentifier,
       title: question,
@@ -1151,11 +1166,15 @@ export const askMultiManualQuestion = action({
       answerText,
       refusal,
       citations: answerCitations,
-      warning: combinedWarning,
       model,
       latencyMs,
       sourceFileName: scopeData.effective.map((v) => v.sourceFileName).join(', '),
-    })
+    }
+    if (combinedWarning) {
+      recordArgs.warning = combinedWarning
+    }
+
+    await ctx.runMutation(internal.chats.internalRecordMultiManualExchange, recordArgs)
 
     await ctx.runMutation(internal.manuals.internalWriteAuditEvent, {
       actorTokenIdentifier: user.tokenIdentifier,
@@ -1169,18 +1188,24 @@ export const askMultiManualQuestion = action({
       },
     })
 
-    return {
+    const result: MultiManualQuestionResult = {
       chatSessionId: chatSessionId!,
       answerText,
       refusal,
       citations: answerCitations,
-      warning: combinedWarning,
       effectiveManualIds,
       effectiveManualVersionIds,
-      excludedManuals: scopeData.excluded.length > 0 ? scopeData.excluded : undefined,
       latencyMs,
       model,
     }
+    if (combinedWarning) {
+      result.warning = combinedWarning
+    }
+    if (scopeData.excluded.length > 0) {
+      result.excludedManuals = scopeData.excluded
+    }
+
+    return result
   },
 })
 
@@ -1188,20 +1213,21 @@ const TITLE_GENERATION_PROMPT = (question: string, answer: string) => `Create a 
 
 Rules:
 - 3 to 6 words
-- clear and specific
-- no quotes
-- no markdown
-- no trailing punctuation
 - title case
+- noun phrase only — do NOT start with a verb or question word (no "Are", "Is", "What", "How", "Can", "Do", "Does", etc.)
+- clear and specific to the topic
+- no quotes, no markdown, no trailing punctuation
 - do not include the words "chat" or "manual"
-- describe the user's actual topic
-- return only the title
+- return only the title, nothing else
+
+Examples of good titles:
+- Night Time Flight Rules
+- Engine Torque Specifications
+- Crew Rest Requirements
+- Fuel Reserve Policy
 
 User question:
-${question}
-
-Assistant answer:
-${answer}`
+${question}${answer ? `\n\nAssistant answer:\n${answer}` : ''}`
 
 export const internalGenerateChatTitle = internalAction({
   args: {
@@ -1596,6 +1622,7 @@ async function callGeminiOrSyntax(
     config: {
       systemInstruction: MANUAL_ONLY_INSTRUCTION,
       temperature: 0,
+      maxOutputTokens: MANUAL_QA_MAX_OUTPUT_TOKENS,
       tools: [
         {
           fileSearch: {
@@ -1628,6 +1655,7 @@ async function callGeminiMultiEntry(
     config: {
       systemInstruction: MANUAL_ONLY_INSTRUCTION,
       temperature: 0,
+      maxOutputTokens: MANUAL_QA_MAX_OUTPUT_TOKENS,
       tools,
     },
   })
@@ -2048,7 +2076,7 @@ function normalizeMultiManualCitations(
         }
       }
 
-      return {
+      return cleanCitation({
         title: matched?.sourceFileName ?? title ?? 'Unknown source',
         manualId: matched?.manualId as string | undefined,
         manualVersionId: matched?.manualVersionId as string | undefined,
@@ -2056,7 +2084,7 @@ function normalizeMultiManualCitations(
         excerpt,
         pageNumber,
         providerUri: uri,
-      }
+      })
     })
     .filter((c): c is NonNullable<typeof c> => c !== null)
     .slice(0, 10)
@@ -2167,16 +2195,32 @@ function normalizeCitations(groundingMetadata: unknown): Citation[] {
       if (!isRecord(chunk) || !isRecord(chunk.retrievedContext)) return null
       const retrievedContext = chunk.retrievedContext
 
-      return {
+      return cleanCitation({
         title: getString(retrievedContext.title),
         uri: getString(retrievedContext.uri),
         pageNumber: getNumber(retrievedContext.pageNumber),
         excerpt: truncate(getString(retrievedContext.text), 280),
         fileSearchStore: getString(retrievedContext.fileSearchStore),
-      }
+      })
     })
     .filter((citation): citation is Citation => citation !== null)
     .slice(0, 5)
+}
+
+function cleanCitation(citation: Citation): Citation {
+  const cleaned: Citation = {}
+  if (citation.title) cleaned.title = citation.title
+  if (citation.uri) cleaned.uri = citation.uri
+  if (citation.pageNumber !== undefined && Number.isFinite(citation.pageNumber)) {
+    cleaned.pageNumber = citation.pageNumber
+  }
+  if (citation.excerpt) cleaned.excerpt = citation.excerpt
+  if (citation.fileSearchStore) cleaned.fileSearchStore = citation.fileSearchStore
+  if (citation.manualId) cleaned.manualId = citation.manualId
+  if (citation.manualVersionId) cleaned.manualVersionId = citation.manualVersionId
+  if (citation.sourceFileName) cleaned.sourceFileName = citation.sourceFileName
+  if (citation.providerUri) cleaned.providerUri = citation.providerUri
+  return cleaned
 }
 
 function shouldRefuse(answerText: string): boolean {
