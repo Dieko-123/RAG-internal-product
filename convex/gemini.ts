@@ -1260,6 +1260,7 @@ export const internalGenerateChatTitle = internalAction({
         await ctx.runMutation(internal.chats.internalUpdateChatTitle, {
           chatSessionId: args.chatSessionId,
           title: raw,
+          sourceQuestion: args.question,
         })
       }
     } catch {
@@ -1312,6 +1313,7 @@ export const backfillChatTitles = action({
           const patched = await ctx.runMutation(internal.chats.internalUpdateChatTitle, {
             chatSessionId: candidate.chatSessionId,
             title: raw,
+            sourceQuestion: candidate.question,
           })
           if (patched) updated++
         }

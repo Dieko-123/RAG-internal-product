@@ -528,8 +528,6 @@ export const internalListBackfillCandidates = internalQuery({
     }> = []
 
     for (const session of result.page) {
-      if (!isReplaceableTitle(session)) continue
-
       const msgs = await ctx.db
         .query('chatMessages')
         .withIndex('by_chatSessionId', (q) =>
@@ -543,6 +541,7 @@ export const internalListBackfillCandidates = internalQuery({
       const userMsg = msgs.find((m) => m.role === 'user')
       const assistantMsg = msgs.find((m) => m.role === 'assistant')
       if (!userMsg || !assistantMsg) continue
+      if (!isReplaceableTitle(session, userMsg.content)) continue
 
       candidates.push({
         chatSessionId: session._id,
@@ -559,12 +558,13 @@ export const internalUpdateChatTitle = internalMutation({
   args: {
     chatSessionId: v.id('chatSessions'),
     title: v.string(),
+    sourceQuestion: v.optional(v.string()),
   },
   handler: async (ctx, args): Promise<boolean> => {
     const session = await ctx.db.get(args.chatSessionId)
     if (!session) return false
 
-    if (!isReplaceableTitle(session)) return false
+    if (!isReplaceableTitle(session, args.sourceQuestion)) return false
 
     const cleaned = cleanGeneratedTitle(args.title)
     if (!cleaned) return false
@@ -577,17 +577,29 @@ export const internalUpdateChatTitle = internalMutation({
   },
 })
 
-function isReplaceableTitle(session: { title: string; titleAiGenerated?: boolean }): boolean {
+function isReplaceableTitle(
+  session: { title: string; titleAiGenerated?: boolean },
+  sourceQuestion?: string,
+): boolean {
+  if (
+    sourceQuestion &&
+    session.title === legacyBuggyNormalizeTitle(sourceQuestion) &&
+    session.title !== normalizeTitle(sourceQuestion)
+  ) {
+    return true
+  }
   // Once marked as AI-generated, never overwrite regardless of length.
   if (session.titleAiGenerated) return false
   if (!session.title || session.title === 'New chat') return true
-  // Deterministic fallback titles from normalizeTitle are ≤34 chars.
+  // Deterministic fallback titles from normalizeTitle are <=34 chars.
   return session.title.length <= 34
 }
 
 function cleanGeneratedTitle(raw: string): string {
   const firstLine = raw.split('\n').map((l) => l.trim()).find((l) => l.length > 0) ?? ''
-  const stripped = firstLine.replace(/^["']|["']$/g, '').replace(/[.,;:!?]+$/, '').trim()
+  const stripped = stripLeadingTitleNoise(
+    firstLine.replace(/^["']|["']$/g, '').replace(/[.,;:!?]+$/, '').trim(),
+  )
   if (stripped.length < 3 || stripped.length > 60) return ''
   return stripped
 }
@@ -624,6 +636,79 @@ async function getActiveManualRecord(ctx: MutationCtx) {
 }
 
 function normalizeTitle(value: string): string {
+  const trimmed = value.trim().replace(/\s+/g, ' ')
+  if (!trimmed) return 'New chat'
+
+  const withoutQuestionPrefix = stripLeadingTitleNoise(
+    trimmed.replace(/^(tell|explain|describe|show|summarize)\b\s+(me\s+)?(about\s+)?/i, ''),
+  )
+  const stopWords = new Set([
+    'a',
+    'an',
+    'and',
+    'are',
+    'for',
+    'from',
+    'in',
+    'my',
+    'of',
+    'on',
+    'the',
+    'to',
+    'we',
+    'with',
+    'your',
+  ])
+  const meaningfulWords = withoutQuestionPrefix
+    .split(' ')
+    .map((word) => word.replace(/^[^\w]+|[^\w]+$/g, ''))
+    .filter((word) => word.length > 0 && !stopWords.has(word.toLowerCase()))
+  const words = meaningfulWords.length > 0 ? meaningfulWords : trimmed.split(' ')
+  const candidate = words.slice(0, 4).join(' ')
+  const normalized = candidate.length <= 34 ? candidate : candidate.slice(0, 31)
+
+  return normalized.replace(/[.,;:!?-]+$/, '') || 'New chat'
+}
+
+const LEADING_TITLE_NOISE = new Set([
+  'about',
+  'are',
+  'can',
+  'could',
+  'did',
+  'do',
+  'does',
+  'how',
+  'i',
+  'is',
+  'it',
+  'should',
+  'that',
+  'the',
+  'there',
+  'this',
+  'to',
+  'we',
+  'what',
+  'when',
+  'where',
+  'why',
+  'would',
+  'you',
+])
+
+function stripLeadingTitleNoise(value: string): string {
+  let remaining = value.trim()
+  for (let i = 0; i < 4; i += 1) {
+    const match = remaining.match(/^([A-Za-z]+)\b[\s,;:]*/)
+    if (!match) break
+    if (!LEADING_TITLE_NOISE.has(match[1].toLowerCase())) break
+    remaining = remaining.slice(match[0].length).trimStart()
+  }
+  return remaining || value.trim()
+}
+
+function legacyBuggyNormalizeTitle(value: string): string {
   const trimmed = value.trim().replace(/\s+/g, ' ')
   if (!trimmed) return 'New chat'
 
