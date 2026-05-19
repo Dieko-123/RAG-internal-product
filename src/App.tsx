@@ -1915,9 +1915,15 @@ function AllManualsModal({
     const term = search.trim().toLowerCase()
     return rows.filter((manual) => {
       const matchesSearch = !term || manual.title.toLowerCase().includes(term)
-      const effectiveStatus = manual.latestIngestionJob?.status ?? manual.status
-      const matchesStatus =
-        statusFilter === 'all' || effectiveStatus === statusFilter
+      // manual.status is the source of truth for archived/active.
+      // latestIngestionJob.status reflects indexing progress (queued/indexing/active/failed)
+      // and never transitions to 'archived', so using it for the filter would hide
+      // archived manuals entirely.
+      const displayStatus =
+        manual.status === 'archived'
+          ? 'archived'
+          : (manual.latestIngestionJob?.status ?? manual.status)
+      const matchesStatus = statusFilter === 'all' || displayStatus === statusFilter
       return matchesSearch && matchesStatus
     })
   }, [manuals, search, statusFilter])
@@ -2008,7 +2014,7 @@ function ManualRow({
         ) : null}
       </div>
       <div className="manual-row-actions">
-        <mark>{manual.latestIngestionJob?.status ?? manual.status}</mark>
+        <mark>{manual.status === 'archived' ? 'archived' : (manual.latestIngestionJob?.status ?? manual.status)}</mark>
         {manual.latestIngestionJob?.status === 'failed' ? (
           manual.latestIngestionJob.canRetryIndexing && onRetry ? (
             <button
