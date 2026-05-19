@@ -7,6 +7,9 @@ import {
   type ErrorInfo,
   type ReactNode,
 } from 'react'
+import ReactMarkdown from 'react-markdown'
+import remarkGfm from 'remark-gfm'
+import rehypeSanitize from 'rehype-sanitize'
 import { SignInButton, SignUpButton, UserButton, useUser } from '@clerk/react'
 import {
   Authenticated,
@@ -629,7 +632,11 @@ function ChatWorkspace({
                   {message.role === 'assistant' && message.warning ? (
                     <div className="message-scope-warning">{message.warning}</div>
                   ) : null}
-                  <p>{message.content}</p>
+                  {message.role === 'assistant' ? (
+                    <MarkdownMessage content={message.content} />
+                  ) : (
+                    <p>{message.content}</p>
+                  )}
                   {message.role === 'assistant' ? (
                     <>
                       <div className="answer-meta">
@@ -699,6 +706,16 @@ function ChatWorkspace({
         </div>
       </div>
     </section>
+  )
+}
+
+function MarkdownMessage({ content }: { content: string }) {
+  return (
+    <div className="markdown-message">
+      <ReactMarkdown remarkPlugins={[remarkGfm]} rehypePlugins={[rehypeSanitize]}>
+        {content}
+      </ReactMarkdown>
+    </div>
   )
 }
 
