@@ -1005,6 +1005,7 @@ function AdminWorkspace({
   >('member')
   const [message, setMessage] = useState<string | null>(null)
   const [error, setError] = useState<string | null>(null)
+  const [showAllManuals, setShowAllManuals] = useState(false)
   const manuals = useQuery(
     api.manuals.listManuals,
     canQuery ? {} : 'skip',
@@ -1221,7 +1222,24 @@ function AdminWorkspace({
         <p>Upload and index manuals for Gemini File Search</p>
       </div>
 
-      <div className="document-grid">
+      {showAllManuals ? (
+        <AllManualsModal
+          manuals={manuals}
+          onClose={() => setShowAllManuals(false)}
+          onRetry={(ingestionJobId) => {
+            void retryIndexing({ ingestionJobId }).then(() => setMessage('Retry indexing queued')).catch((err) => setError(err instanceof Error ? err.message : 'Retry failed'))
+          }}
+          onArchive={(manualId) => {
+            void archiveManual({ manualId }).then(() => setMessage('Manual archived')).catch((err) => setError(err instanceof Error ? err.message : 'Archive failed'))
+          }}
+          onRestore={(manualId) => {
+            void restoreManual({ manualId }).then(() => setMessage('Manual restored')).catch((err) => setError(err instanceof Error ? err.message : 'Restore failed'))
+          }}
+        />
+      ) : null}
+
+      <div className="admin-grid">
+        <div className="admin-left">
         <section className="manual-panel">
           <div className="upload-zone">
             <div className="drop-area">
@@ -1345,31 +1363,6 @@ function AdminWorkspace({
           ) : null}
         </section>
 
-        <ManualStatusList
-          manuals={manuals}
-          onRetry={(ingestionJobId) => {
-            void retryIndexing({ ingestionJobId }).then(() => {
-              setMessage('Retry indexing queued')
-            }).catch((err) => {
-              setError(err instanceof Error ? err.message : 'Retry failed')
-            })
-          }}
-          onArchive={(manualId) => {
-            void archiveManual({ manualId }).then(() => {
-              setMessage('Manual archived')
-            }).catch((err) => {
-              setError(err instanceof Error ? err.message : 'Archive failed')
-            })
-          }}
-          onRestore={(manualId) => {
-            void restoreManual({ manualId }).then(() => {
-              setMessage('Manual restored')
-            }).catch((err) => {
-              setError(err instanceof Error ? err.message : 'Restore failed')
-            })
-          }}
-        />
-
         <section className="manual-panel admin-org-panel">
           <div>
             <h2>Invite user</h2>
@@ -1447,7 +1440,7 @@ function AdminWorkspace({
             {isInviting ? 'Sending...' : 'Send invitation'}
           </button>
           {(invites ?? []).length > 0 ? (
-            <div className="compact-list" aria-label="Pending invites">
+            <div className="compact-list-scroll" aria-label="Pending invites">
               <div className="history-group-label">Invitations</div>
               {(invites ?? []).map((invite: Invite) => (
                 <div className="compact-row" key={invite._id}>
@@ -1482,6 +1475,34 @@ function AdminWorkspace({
             </div>
           ) : null}
         </section>
+        </div>{/* end admin-left */}
+
+        <div className="admin-right">
+        <RecentManualsList
+          manuals={manuals}
+          onViewAll={() => setShowAllManuals(true)}
+          onRetry={(ingestionJobId) => {
+            void retryIndexing({ ingestionJobId }).then(() => {
+              setMessage('Retry indexing queued')
+            }).catch((err) => {
+              setError(err instanceof Error ? err.message : 'Retry failed')
+            })
+          }}
+          onArchive={(manualId) => {
+            void archiveManual({ manualId }).then(() => {
+              setMessage('Manual archived')
+            }).catch((err) => {
+              setError(err instanceof Error ? err.message : 'Archive failed')
+            })
+          }}
+          onRestore={(manualId) => {
+            void restoreManual({ manualId }).then(() => {
+              setMessage('Manual restored')
+            }).catch((err) => {
+              setError(err instanceof Error ? err.message : 'Restore failed')
+            })
+          }}
+        />
 
         {isOrgAdmin ? (
           <section className="manual-panel admin-org-panel">
@@ -1631,7 +1652,8 @@ function AdminWorkspace({
             />
           </section>
         ) : null}
-      </div>
+        </div>{/* end admin-right */}
+      </div>{/* end admin-grid */}
     </>
   )
 }
@@ -1650,13 +1672,13 @@ function DepartmentMemberList({
   }, [users])
 
   if (members === undefined) {
-    return <div className="compact-list"><span>Select a department to view members</span></div>
+    return <div className="compact-list-scroll"><span className="compact-empty">Select a department to view members</span></div>
   }
 
   return (
-    <div className="compact-list" aria-label="Department members">
+    <div className="compact-list-scroll" aria-label="Department members">
       {members.length === 0 ? (
-        <span>No members assigned to this department</span>
+        <span className="compact-empty">No members assigned to this department</span>
       ) : (
         members.map((member) => {
           const user = usersByToken.get(member.userTokenIdentifier)
@@ -1697,11 +1719,11 @@ function DepartmentList({
   const rows = departments ?? []
 
   return (
-    <div className="compact-list" aria-label="Departments">
+    <div className="compact-list-scroll" aria-label="Departments">
       {departments === undefined ? (
-        <span>Loading departments...</span>
+        <span className="compact-empty">Loading departments...</span>
       ) : rows.length === 0 ? (
-        <span>No departments yet</span>
+        <span className="compact-empty">No departments yet</span>
       ) : (
         rows.map((department) => (
           <div className="compact-row" key={department._id}>
@@ -1757,10 +1779,11 @@ function UserList({
         value={search}
         onChange={(e) => setSearch(e.target.value)}
       />
+      <div className="compact-list-scroll">
       {users === undefined ? (
-        <span>Loading users...</span>
+        <span className="compact-empty">Loading users...</span>
       ) : filtered.length === 0 ? (
-        <span>{search ? 'No matching users' : 'No users yet'}</span>
+        <span className="compact-empty">{search ? 'No matching users' : 'No users yet'}</span>
       ) : (
         filtered.map((user) => (
           <div className="compact-row" key={user._id}>
@@ -1794,6 +1817,237 @@ function UserList({
           </div>
         ))
       )}
+      </div>{/* end compact-list-scroll */}
+    </div>
+  )
+}
+
+const RECENT_MANUALS_LIMIT = 6
+
+function RecentManualsList({
+  manuals,
+  onViewAll,
+  onRetry,
+  onArchive,
+  onRestore,
+}: {
+  manuals: ManualListItem[] | undefined
+  onViewAll: () => void
+  onRetry: (ingestionJobId: Id<'ingestionJobs'>) => void
+  onArchive: (manualId: Id<'manuals'>) => void
+  onRestore: (manualId: Id<'manuals'>) => void
+}) {
+  const recent = useMemo(() => (manuals ?? []).slice(0, RECENT_MANUALS_LIMIT), [manuals])
+  const total = manuals?.length ?? 0
+
+  return (
+    <section className="manual-panel admin-org-panel" aria-label="Recent manuals">
+      <div className="admin-card-header">
+        <div>
+          <h2>Recent manuals</h2>
+          <p>Latest uploads and their indexing status.</p>
+        </div>
+      </div>
+      {manuals === undefined ? (
+        <div className="manual-row muted-row">Loading manuals...</div>
+      ) : recent.length === 0 ? (
+        <div className="manual-row muted-row">No manuals uploaded yet</div>
+      ) : (
+        <div className="recent-manual-rows">
+          {recent.map((manual) => (
+            <ManualRow
+              key={manual._id}
+              manual={manual}
+              onRetry={onRetry}
+              onArchive={onArchive}
+              onRestore={onRestore}
+            />
+          ))}
+        </div>
+      )}
+      <div className="admin-card-footer">
+        {total > 0 ? (
+          <span className="admin-card-count">
+            Showing {Math.min(RECENT_MANUALS_LIMIT, total)} of {total}
+          </span>
+        ) : null}
+        <button
+          type="button"
+          className="btn-link"
+          onClick={onViewAll}
+        >
+          View all manuals →
+        </button>
+      </div>
+    </section>
+  )
+}
+
+const STATUS_FILTERS = ['all', 'active', 'indexing', 'failed', 'archived'] as const
+type StatusFilter = typeof STATUS_FILTERS[number]
+
+function AllManualsModal({
+  manuals,
+  onClose,
+  onRetry,
+  onArchive,
+  onRestore,
+}: {
+  manuals: ManualListItem[] | undefined
+  onClose: () => void
+  onRetry: (ingestionJobId: Id<'ingestionJobs'>) => void
+  onArchive: (manualId: Id<'manuals'>) => void
+  onRestore: (manualId: Id<'manuals'>) => void
+}) {
+  const [search, setSearch] = useState('')
+  const [statusFilter, setStatusFilter] = useState<StatusFilter>('all')
+
+  useEffect(() => {
+    function onKey(e: KeyboardEvent) {
+      if (e.key === 'Escape') onClose()
+    }
+    document.addEventListener('keydown', onKey)
+    return () => document.removeEventListener('keydown', onKey)
+  }, [onClose])
+
+  const filtered = useMemo(() => {
+    const rows = manuals ?? []
+    const term = search.trim().toLowerCase()
+    return rows.filter((manual) => {
+      const matchesSearch = !term || manual.title.toLowerCase().includes(term)
+      const effectiveStatus = manual.latestIngestionJob?.status ?? manual.status
+      const matchesStatus =
+        statusFilter === 'all' || effectiveStatus === statusFilter
+      return matchesSearch && matchesStatus
+    })
+  }, [manuals, search, statusFilter])
+
+  const total = manuals?.length ?? 0
+
+  return (
+    <div className="modal-overlay" onClick={(e) => { if (e.target === e.currentTarget) onClose() }}>
+      <div className="modal-panel" role="dialog" aria-label="All manuals" aria-modal="true">
+        <div className="modal-header">
+          <div>
+            <h2>All manuals</h2>
+            <p>{total} {total === 1 ? 'manual' : 'manuals'} total</p>
+          </div>
+          <button type="button" className="modal-close" onClick={onClose} aria-label="Close">
+            ✕
+          </button>
+        </div>
+        <div className="modal-controls">
+          <input
+            type="text"
+            className="user-search"
+            placeholder="Search manuals..."
+            value={search}
+            onChange={(e) => setSearch(e.target.value)}
+            autoFocus
+          />
+          <div className="modal-filter-pills">
+            {STATUS_FILTERS.map((f) => (
+              <button
+                key={f}
+                type="button"
+                className={`filter-pill${statusFilter === f ? ' filter-pill-active' : ''}`}
+                onClick={() => setStatusFilter(f)}
+              >
+                {f.charAt(0).toUpperCase() + f.slice(1)}
+              </button>
+            ))}
+          </div>
+        </div>
+        <div className="modal-list">
+          {manuals === undefined ? (
+            <div className="manual-row muted-row">Loading manuals...</div>
+          ) : filtered.length === 0 ? (
+            <div className="manual-row muted-row">
+              {search || statusFilter !== 'all' ? 'No matching manuals' : 'No manuals uploaded yet'}
+            </div>
+          ) : (
+            filtered.map((manual) => (
+              <ManualRow
+                key={manual._id}
+                manual={manual}
+                onRetry={onRetry}
+                onArchive={onArchive}
+                onRestore={onRestore}
+              />
+            ))
+          )}
+        </div>
+      </div>
+    </div>
+  )
+}
+
+function ManualRow({
+  manual,
+  onRetry,
+  onArchive,
+  onRestore,
+}: {
+  manual: ManualListItem
+  onRetry?: (ingestionJobId: Id<'ingestionJobs'>) => void
+  onArchive?: (manualId: Id<'manuals'>) => void
+  onRestore?: (manualId: Id<'manuals'>) => void
+}) {
+  return (
+    <div className="manual-row">
+      <div>
+        <strong>{manual.title}</strong>
+        <span>
+          {manual.slug}
+          {manual.visibility ? ` / ${manual.visibility}` : ''}
+        </span>
+        {manual.latestIngestionJob?.lastError ? (
+          <span className="manual-error">
+            {manual.latestIngestionJob.lastError}
+          </span>
+        ) : null}
+      </div>
+      <div className="manual-row-actions">
+        <mark>{manual.latestIngestionJob?.status ?? manual.status}</mark>
+        {manual.latestIngestionJob?.status === 'failed' ? (
+          manual.latestIngestionJob.canRetryIndexing && onRetry ? (
+            <button
+              type="button"
+              className="btn-small"
+              onClick={() => {
+                const jobId = manual.latestIngestionJob?._id
+                if (jobId) onRetry(jobId)
+              }}
+            >
+              Retry indexing
+            </button>
+          ) : (
+            <span className="manual-action-note">Re-upload required</span>
+          )
+        ) : null}
+        {onArchive && manual.status === 'active' ? (
+          <button
+            type="button"
+            className="btn-small btn-danger"
+            onClick={() => {
+              if (confirm(`Archive "${manual.title}"? It will be hidden from new chats.`)) {
+                onArchive(manual._id)
+              }
+            }}
+          >
+            Archive
+          </button>
+        ) : null}
+        {onRestore && manual.status === 'archived' ? (
+          <button
+            type="button"
+            className="btn-small"
+            onClick={() => onRestore(manual._id)}
+          >
+            Restore
+          </button>
+        ) : null}
+      </div>
     </div>
   )
 }
@@ -1838,61 +2092,13 @@ function ManualStatusList({
         </div>
       ) : (
         filtered.map((manual) => (
-          <div className="manual-row" key={manual._id}>
-            <div>
-              <strong>{manual.title}</strong>
-              <span>
-                {manual.slug}
-                {manual.visibility ? ` / ${manual.visibility}` : ''}
-              </span>
-              {manual.latestIngestionJob?.lastError ? (
-                <span className="manual-error">
-                  {manual.latestIngestionJob.lastError}
-                </span>
-              ) : null}
-            </div>
-            <div className="manual-row-actions">
-              <mark>{manual.latestIngestionJob?.status ?? manual.status}</mark>
-              {manual.latestIngestionJob?.status === 'failed' ? (
-                manual.latestIngestionJob.canRetryIndexing && onRetry ? (
-                  <button
-                    type="button"
-                    className="btn-small"
-                    onClick={() => {
-                      const jobId = manual.latestIngestionJob?._id
-                      if (jobId) onRetry(jobId)
-                    }}
-                  >
-                    Retry indexing
-                  </button>
-                ) : (
-                  <span className="manual-action-note">Re-upload required</span>
-                )
-              ) : null}
-              {onArchive && manual.status === 'active' ? (
-                <button
-                  type="button"
-                  className="btn-small btn-danger"
-                  onClick={() => {
-                    if (confirm(`Archive "${manual.title}"? It will be hidden from new chats.`)) {
-                      onArchive(manual._id)
-                    }
-                  }}
-                >
-                  Archive
-                </button>
-              ) : null}
-              {onRestore && manual.status === 'archived' ? (
-                <button
-                  type="button"
-                  className="btn-small"
-                  onClick={() => onRestore(manual._id)}
-                >
-                  Restore
-                </button>
-              ) : null}
-            </div>
-          </div>
+          <ManualRow
+            key={manual._id}
+            manual={manual}
+            onRetry={onRetry}
+            onArchive={onArchive}
+            onRestore={onRestore}
+          />
         ))
       )}
     </section>
