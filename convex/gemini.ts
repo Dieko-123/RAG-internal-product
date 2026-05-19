@@ -951,7 +951,8 @@ export const askMultiManualQuestion = action({
       if (!args.selectedManualIds || args.selectedManualIds.length === 0) {
         throw new Error('Select at least one manual.')
       }
-      if (args.selectedManualIds.length > 30) {
+      const dedupedManualIds = [...new Set(args.selectedManualIds)]
+      if (dedupedManualIds.length > 30) {
         throw new Error('Select at most 30 manuals.')
       }
 
@@ -969,7 +970,7 @@ export const askMultiManualQuestion = action({
       } = await ctx.runMutation(internal.chats.internalLockChatScope, {
         userTokenIdentifier: user.tokenIdentifier,
         organizationId: orgId,
-        selectedManualIds: args.selectedManualIds,
+        selectedManualIds: dedupedManualIds,
         title: question,
       })
 
@@ -1055,53 +1056,68 @@ export const askMultiManualQuestion = action({
     let response: Awaited<ReturnType<typeof ai.models.generateContent>>
     let usedFilterMode: 'or_syntax' | 'multi_entry'
 
-    // multi_entry sends one tool entry per manual; cap at 20 to avoid exceeding
-    // Gemini's tool-list limits until broader counts are validated.
+    // OR mode: single filter expression, supports up to 30 manuals.
+    // multi_entry mode: one tool entry per manual, capped at 20 until broader
+    // counts are validated against the Gemini API.
     const MULTI_ENTRY_MAX = 20
-    if (cachedFilterMode === 'multi_entry' && scopeData.effective.length > MULTI_ENTRY_MAX) {
-      throw new Error(
-        `Please select fewer manuals for this query. Multi-entry filter mode supports at most ${MULTI_ENTRY_MAX} manuals.`,
-      )
-    }
 
-    if (cachedFilterMode === 'multi_entry') {
-      response = await callGeminiMultiEntry(ai, model, question, storeName, scopeData.effective)
-      usedFilterMode = 'multi_entry'
-    } else if (cachedFilterMode === 'or_syntax') {
-      response = await callGeminiOrSyntax(ai, model, question, storeName, scopeData.effective)
-      usedFilterMode = 'or_syntax'
-    } else {
+    // Cached filter mode is a speed hint, not a guarantee. Gemini can reject OR
+    // syntax after an API update. Always fall back to multi_entry on syntax
+    // errors, and always try OR for selections that exceed multi_entry's cap.
+    const effectiveCount = scopeData.effective.length
+    const canUseMultiEntry = effectiveCount <= MULTI_ENTRY_MAX
+
+    const tryOrFirst =
+      cachedFilterMode !== 'multi_entry' || effectiveCount > MULTI_ENTRY_MAX
+
+    if (tryOrFirst) {
       try {
         response = await callGeminiOrSyntax(ai, model, question, storeName, scopeData.effective)
         usedFilterMode = 'or_syntax'
-        await ctx.runMutation(internal.users.internalSetOrgFilterMode, {
-          organizationId: orgId,
-          geminiFilterMode: 'or_syntax',
-        })
+        if (cachedFilterMode !== 'or_syntax') {
+          await ctx.runMutation(internal.users.internalSetOrgFilterMode, {
+            organizationId: orgId,
+            geminiFilterMode: 'or_syntax',
+          })
+        }
       } catch (orError) {
         const errorMessage = orError instanceof Error ? orError.message : ''
         if (isFilterSyntaxError(errorMessage)) {
-          if (scopeData.effective.length > MULTI_ENTRY_MAX) {
+          if (!canUseMultiEntry) {
             throw new Error(
-              `Please select fewer manuals for this query. Multi-entry filter mode supports at most ${MULTI_ENTRY_MAX} manuals.`,
+              `Please select ${MULTI_ENTRY_MAX} or fewer manuals and try again.`,
               { cause: orError },
             )
           }
           try {
             response = await callGeminiMultiEntry(ai, model, question, storeName, scopeData.effective)
             usedFilterMode = 'multi_entry'
-            await ctx.runMutation(internal.users.internalSetOrgFilterMode, {
-              organizationId: orgId,
-              geminiFilterMode: 'multi_entry',
-            })
+            if (cachedFilterMode !== 'multi_entry') {
+              await ctx.runMutation(internal.users.internalSetOrgFilterMode, {
+                organizationId: orgId,
+                geminiFilterMode: 'multi_entry',
+              })
+            }
           } catch (fallbackError) {
-            throw new Error('I could not search the selected manuals safely.', {
-              cause: fallbackError,
-            })
+            throw new Error(
+              'I could not search the selected manuals safely. Please try fewer manuals or try again.',
+              { cause: fallbackError },
+            )
           }
         } else {
           throw orError
         }
+      }
+    } else {
+      // Org is cached to multi_entry and selection fits within its cap.
+      try {
+        response = await callGeminiMultiEntry(ai, model, question, storeName, scopeData.effective)
+        usedFilterMode = 'multi_entry'
+      } catch (multiEntryError) {
+        throw new Error(
+          'I could not search the selected manuals. Please try again.',
+          { cause: multiEntryError },
+        )
       }
     }
 

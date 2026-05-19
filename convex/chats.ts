@@ -211,8 +211,11 @@ export const internalRecordChatExchange = internalMutation({
       })
     }
 
-    const session = await ctx.db.get(chatSessionId)
-    const shouldRetitle = session?.title === 'New chat'
+    const existingMessageCount = await ctx.db
+      .query('chatMessages')
+      .withIndex('by_chatSessionId', (q) => q.eq('chatSessionId', chatSessionId))
+      .take(1)
+    const isFirstExchange = existingMessageCount.length === 0
 
     await ctx.db.insert('chatMessages', {
       chatSessionId,
@@ -235,14 +238,9 @@ export const internalRecordChatExchange = internalMutation({
       createdAt: now + 1,
     })
 
-    await ctx.db.patch(
-      chatSessionId,
-      shouldRetitle
-        ? { title: normalizeTitle(args.title), updatedAt: now }
-        : { updatedAt: now },
-    )
+    await ctx.db.patch(chatSessionId, { updatedAt: now })
 
-    if (shouldRetitle && !args.refusal) {
+    if (isFirstExchange && !args.refusal) {
       await ctx.scheduler.runAfter(0, internal.gemini.internalGenerateChatTitle, {
         chatSessionId,
         question: args.question,
@@ -441,7 +439,14 @@ export const internalRecordMultiManualExchange = internalMutation({
       throw new Error('Chat not found')
     }
 
-    const shouldRetitle = session.title === 'New chat'
+    // First exchange = no messages yet. Use this rather than checking the title
+    // string, because new sessions are created with deterministic fallback titles
+    // (not "New chat"), so a title-string check would always skip AI generation.
+    const existingMessageCount = await ctx.db
+      .query('chatMessages')
+      .withIndex('by_chatSessionId', (q) => q.eq('chatSessionId', args.chatSessionId))
+      .take(1)
+    const isFirstExchange = existingMessageCount.length === 0
 
     await ctx.db.insert('chatMessages', {
       chatSessionId: args.chatSessionId,
@@ -465,14 +470,9 @@ export const internalRecordMultiManualExchange = internalMutation({
       createdAt: now + 1,
     })
 
-    await ctx.db.patch(
-      args.chatSessionId,
-      shouldRetitle
-        ? { title: normalizeTitle(args.title), updatedAt: now }
-        : { updatedAt: now },
-    )
+    await ctx.db.patch(args.chatSessionId, { updatedAt: now })
 
-    if (shouldRetitle && !args.refusal) {
+    if (isFirstExchange && !args.refusal) {
       await ctx.scheduler.runAfter(0, internal.gemini.internalGenerateChatTitle, {
         chatSessionId: args.chatSessionId,
         question: args.question,
