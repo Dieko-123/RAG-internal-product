@@ -720,17 +720,26 @@ export const internalGetManualVersionsForScope = internalQuery({
         }
       }
 
-      effective.push({
+      const effectiveVersion: EffectiveVersion = {
         manualId: manual._id,
         manualVersionId: version._id,
         title: manual.title,
         sourceFileName: version.sourceFileName,
-        geminiFileName: version.geminiFileName,
-        geminiDocumentName:
-          version.geminiDocumentName ?? version.geminiFileSearchDocumentName,
-        geminiFileSearchStoreName: version.geminiFileSearchStoreName,
         providerMode,
-      })
+      }
+      if (version.geminiFileName) {
+        effectiveVersion.geminiFileName = version.geminiFileName
+      }
+      const geminiDocumentName =
+        version.geminiDocumentName ?? version.geminiFileSearchDocumentName
+      if (geminiDocumentName) {
+        effectiveVersion.geminiDocumentName = geminiDocumentName
+      }
+      if (version.geminiFileSearchStoreName) {
+        effectiveVersion.geminiFileSearchStoreName = version.geminiFileSearchStoreName
+      }
+
+      effective.push(effectiveVersion)
     }
 
     return {
