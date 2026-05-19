@@ -572,7 +572,6 @@ export const internalUpdateChatTitle = internalMutation({
     await ctx.db.patch(args.chatSessionId, {
       title: cleaned,
       titleAiGenerated: true,
-      updatedAt: Date.now(),
     })
     return true
   },
