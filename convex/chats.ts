@@ -484,6 +484,51 @@ export const internalRecordMultiManualExchange = internalMutation({
   },
 })
 
+export const internalListBackfillCandidates = internalQuery({
+  args: {
+    cursor: v.union(v.string(), v.null()),
+    batchSize: v.number(),
+  },
+  handler: async (ctx, args) => {
+    const result = await ctx.db
+      .query('chatSessions')
+      .order('asc')
+      .paginate({ cursor: args.cursor, numItems: args.batchSize })
+
+    const candidates: Array<{
+      chatSessionId: Id<'chatSessions'>
+      question: string
+      answerText: string
+    }> = []
+
+    for (const session of result.page) {
+      if (!isGeneratedTitle(session.title)) continue
+
+      const msgs = await ctx.db
+        .query('chatMessages')
+        .withIndex('by_chatSessionId', (q) =>
+          q.eq('chatSessionId', session._id),
+        )
+        .order('asc')
+        .take(2)
+
+      if (msgs.length < 2) continue
+
+      const userMsg = msgs.find((m) => m.role === 'user')
+      const assistantMsg = msgs.find((m) => m.role === 'assistant')
+      if (!userMsg || !assistantMsg) continue
+
+      candidates.push({
+        chatSessionId: session._id,
+        question: userMsg.content,
+        answerText: assistantMsg.refusal ? '' : assistantMsg.content,
+      })
+    }
+
+    return { candidates, isDone: result.isDone, continueCursor: result.continueCursor }
+  },
+})
+
 export const internalUpdateChatTitle = internalMutation({
   args: {
     chatSessionId: v.id('chatSessions'),

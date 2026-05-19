@@ -1242,6 +1242,67 @@ export const internalGenerateChatTitle = internalAction({
   },
 })
 
+export const backfillChatTitles = action({
+  args: {
+    batchSize: v.optional(v.number()),
+    cursor: v.optional(v.union(v.string(), v.null())),
+  },
+  handler: async (ctx, args): Promise<{
+    processed: number
+    updated: number
+    isDone: boolean
+    continueCursor: string | null
+  }> => {
+    await requireAdmin(ctx)
+
+    const apiKey = process.env.GEMINI_API_KEY?.trim()
+    if (!apiKey) throw new Error('GEMINI_API_KEY not configured.')
+
+    const model = process.env.CHAT_TITLE_MODEL?.trim() || 'gemini-2.5-flash'
+    const batchSize = Math.min(args.batchSize ?? 50, 100)
+    const cursor = args.cursor ?? null
+
+    const { candidates, isDone, continueCursor } = await ctx.runQuery(
+      internal.chats.internalListBackfillCandidates,
+      { cursor, batchSize },
+    )
+
+    const ai = new GoogleGenAI({ apiKey })
+    let updated = 0
+
+    for (const candidate of candidates) {
+      try {
+        const prompt = TITLE_GENERATION_PROMPT(
+          candidate.question.slice(0, 600),
+          candidate.answerText.slice(0, 800),
+        )
+        const response = await ai.models.generateContent({
+          model,
+          contents: prompt,
+          config: { temperature: 0.4, maxOutputTokens: 32 },
+        })
+        const raw = response.text?.trim() ?? ''
+        if (raw) {
+          await ctx.runMutation(internal.chats.internalUpdateChatTitle, {
+            chatSessionId: candidate.chatSessionId,
+            title: raw,
+          })
+          updated++
+        }
+      } catch {
+        // Skip this session and continue with the rest.
+      }
+    }
+
+    return {
+      processed: candidates.length,
+      updated,
+      isDone,
+      continueCursor: isDone ? null : continueCursor,
+    }
+  },
+})
+
 export const debugGeminiRetrievalForManual = action({
   args: {
     manualId: v.optional(v.id('manuals')),
