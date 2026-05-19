@@ -2157,17 +2157,21 @@ function validateManualUpload(args: {
     throw new Error('Manual file name is required.')
   }
 
-  if (!['pdf', 'txt', 'md'].includes(extension)) {
-    throw new Error('Only PDF, TXT, and MD manuals are supported in Phase 2A.')
+  if (!['pdf', 'txt', 'md', 'docx'].includes(extension)) {
+    throw new Error('Only PDF, TXT, MD, and DOCX manuals are supported.')
   }
 
+  const DOCX_MIME = 'application/vnd.openxmlformats-officedocument.wordprocessingml.document'
   if (
     (extension === 'pdf' && mimeType !== 'application/pdf') ||
     (extension === 'txt' && mimeType !== 'text/plain') ||
-    (extension === 'md' && !['text/markdown', 'text/plain'].includes(mimeType))
+    (extension === 'md' && !['text/markdown', 'text/plain'].includes(mimeType)) ||
+    (extension === 'docx' && mimeType !== DOCX_MIME)
   ) {
     throw new Error('Manual file type does not match the selected file extension.')
   }
+  // TODO: If direct DOCX retrieval quality is poor, add a server-side Mammoth
+  // extraction fallback: DOCX → extract raw text → upload extracted TXT to Gemini.
 
   if (!Number.isFinite(args.sizeBytes) || args.sizeBytes <= 0) {
     throw new Error('Manual file is empty.')
@@ -2192,6 +2196,7 @@ function normalizeMimeType(mimeType: string, sourceFileName: string): string {
   const extension = getFileExtension(sourceFileName)
   if (extension === 'pdf') return 'application/pdf'
   if (extension === 'md') return 'text/markdown'
+  if (extension === 'docx') return 'application/vnd.openxmlformats-officedocument.wordprocessingml.document'
   return 'text/plain'
 }
 

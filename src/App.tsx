@@ -104,11 +104,12 @@ type Invite = {
 }
 
 const maxManualUploadBytes = 25 * 1024 * 1024
-const supportedManualExtensions = ['pdf', 'txt', 'md']
+const supportedManualExtensions = ['pdf', 'txt', 'md', 'docx']
 const supportedManualMimeTypes = [
   'application/pdf',
   'text/plain',
   'text/markdown',
+  'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
   '',
 ]
 
@@ -1235,7 +1236,7 @@ function AdminWorkspace({
               <span className="file-types">PDF, TXT, or MD up to 25 MB</span>
               <input
                 type="file"
-                accept=".pdf,.txt,.md,application/pdf,text/plain,text/markdown"
+                accept=".pdf,.txt,.md,.docx,application/pdf,text/plain,text/markdown,application/vnd.openxmlformats-officedocument.wordprocessingml.document"
                 onChange={(event) => {
                   const file = event.target.files?.[0] ?? null
                   const validationError = file ? validateManualFile(file) : null
@@ -1984,7 +1985,7 @@ function validateManualFile(file: File): string | null {
   const mimeType = file.type.toLowerCase()
 
   if (!supportedManualExtensions.includes(extension)) {
-    return 'Only PDF, TXT, and MD manuals are supported.'
+    return 'Only PDF, TXT, MD, and DOCX manuals are supported.'
   }
 
   if (!supportedManualMimeTypes.includes(mimeType)) {
