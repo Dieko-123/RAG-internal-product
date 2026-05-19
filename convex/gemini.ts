@@ -1259,7 +1259,7 @@ export const backfillChatTitles = action({
     if (!apiKey) throw new Error('GEMINI_API_KEY not configured.')
 
     const model = process.env.CHAT_TITLE_MODEL?.trim() || 'gemini-2.5-flash'
-    const batchSize = Math.min(args.batchSize ?? 50, 100)
+    const batchSize = Math.max(1, Math.min(args.batchSize ?? 50, 100))
     const cursor = args.cursor ?? null
 
     const { candidates, isDone, continueCursor } = await ctx.runQuery(
@@ -1283,11 +1283,11 @@ export const backfillChatTitles = action({
         })
         const raw = response.text?.trim() ?? ''
         if (raw) {
-          await ctx.runMutation(internal.chats.internalUpdateChatTitle, {
+          const patched = await ctx.runMutation(internal.chats.internalUpdateChatTitle, {
             chatSessionId: candidate.chatSessionId,
             title: raw,
           })
-          updated++
+          if (patched) updated++
         }
       } catch {
         // Skip this session and continue with the rest.

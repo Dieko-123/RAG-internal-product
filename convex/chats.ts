@@ -534,17 +534,18 @@ export const internalUpdateChatTitle = internalMutation({
     chatSessionId: v.id('chatSessions'),
     title: v.string(),
   },
-  handler: async (ctx, args) => {
+  handler: async (ctx, args): Promise<boolean> => {
     const session = await ctx.db.get(args.chatSessionId)
-    if (!session) return
+    if (!session) return false
 
     const isTitleGenerated = isGeneratedTitle(session.title)
-    if (!isTitleGenerated) return
+    if (!isTitleGenerated) return false
 
     const cleaned = cleanGeneratedTitle(args.title)
-    if (!cleaned) return
+    if (!cleaned) return false
 
     await ctx.db.patch(args.chatSessionId, { title: cleaned, updatedAt: Date.now() })
+    return true
   },
 })
 
