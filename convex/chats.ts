@@ -456,19 +456,45 @@ export const internalRecordMultiManualExchange = internalMutation({
       createdAt: now,
     })
 
-    await ctx.db.insert('chatMessages', {
+    const assistantMessage: {
+      chatSessionId: Id<'chatSessions'>
+      userTokenIdentifier: string
+      role: 'assistant'
+      content: string
+      refusal: boolean
+      citations: Array<{
+        title?: string
+        uri?: string
+        pageNumber?: number
+        excerpt?: string
+        fileSearchStore?: string
+        manualId?: string
+        manualVersionId?: string
+        sourceFileName?: string
+        providerUri?: string
+      }>
+      warning?: string
+      model: string
+      latencyMs: number
+      sourceFileName: string
+      createdAt: number
+    } = {
       chatSessionId: args.chatSessionId,
       userTokenIdentifier: args.userTokenIdentifier,
       role: 'assistant',
       content: args.answerText,
       refusal: args.refusal,
       citations: args.citations,
-      warning: args.warning,
       model: args.model,
       latencyMs: args.latencyMs,
       sourceFileName: args.sourceFileName,
       createdAt: now + 1,
-    })
+    }
+    if (args.warning) {
+      assistantMessage.warning = args.warning
+    }
+
+    await ctx.db.insert('chatMessages', assistantMessage)
 
     await ctx.db.patch(args.chatSessionId, { updatedAt: now })
 
@@ -502,7 +528,7 @@ export const internalListBackfillCandidates = internalQuery({
     }> = []
 
     for (const session of result.page) {
-      if (!isGeneratedTitle(session.title)) continue
+      if (!isReplaceableTitle(session)) continue
 
       const msgs = await ctx.db
         .query('chatMessages')
@@ -538,22 +564,26 @@ export const internalUpdateChatTitle = internalMutation({
     const session = await ctx.db.get(args.chatSessionId)
     if (!session) return false
 
-    const isTitleGenerated = isGeneratedTitle(session.title)
-    if (!isTitleGenerated) return false
+    if (!isReplaceableTitle(session)) return false
 
     const cleaned = cleanGeneratedTitle(args.title)
     if (!cleaned) return false
 
-    await ctx.db.patch(args.chatSessionId, { title: cleaned, updatedAt: Date.now() })
+    await ctx.db.patch(args.chatSessionId, {
+      title: cleaned,
+      titleAiGenerated: true,
+      updatedAt: Date.now(),
+    })
     return true
   },
 })
 
-function isGeneratedTitle(title: string): boolean {
-  if (!title || title === 'New chat') return true
-  // Deterministic fallback titles are short (≤34 chars) plain word strings — treat
-  // them as replaceable so AI-generated titles can improve them.
-  return title.length <= 34
+function isReplaceableTitle(session: { title: string; titleAiGenerated?: boolean }): boolean {
+  // Once marked as AI-generated, never overwrite regardless of length.
+  if (session.titleAiGenerated) return false
+  if (!session.title || session.title === 'New chat') return true
+  // Deterministic fallback titles from normalizeTitle are ≤34 chars.
+  return session.title.length <= 34
 }
 
 function cleanGeneratedTitle(raw: string): string {

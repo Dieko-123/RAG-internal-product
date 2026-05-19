@@ -208,6 +208,7 @@ export default defineSchema({
     manualId: v.id('manuals'),
     manualVersionId: v.id('manualVersions'),
     title: v.string(),
+    titleAiGenerated: v.optional(v.boolean()),
     pinned: v.optional(v.boolean()),
     pinnedAt: v.optional(v.number()),
     createdAt: v.number(),
