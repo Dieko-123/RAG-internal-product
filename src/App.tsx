@@ -1934,7 +1934,7 @@ function ChatSessionGroup({
             onClick={() => onOpenChat(session)}
             title={session.title || 'New chat'}
           >
-            <span>{formatChatTitle(session.title)}</span>
+            <span>{session.title || 'New chat'}</span>
             {session.manualTitles && session.manualTitles.length > 0 ? (
               <span className="history-scope">
                 {formatScopeLabel(session.manualTitles)}
@@ -2008,44 +2008,6 @@ function getFileExtension(fileName: string) {
   return index === -1 ? '' : fileName.slice(index + 1).toLowerCase()
 }
 
-function formatChatTitle(value: string | null | undefined): string {
-  const trimmed = value?.trim().replace(/\s+/g, ' ') ?? ''
-  if (!trimmed) return 'New chat'
-
-  const withoutQuestionPrefix = trimmed
-    .replace(/^(can|could|would|should|do|does|did|what|when|where|why|how|is|are)\s+(i|we|you|the|this|that|there|it)?\s*/i, '')
-    .replace(/^(tell|explain|describe|show|summarize)\s+(me\s+)?(about\s+)?/i, '')
-  const stopWords = new Set([
-    'a',
-    'an',
-    'and',
-    'are',
-    'for',
-    'from',
-    'in',
-    'my',
-    'of',
-    'on',
-    'the',
-    'to',
-    'we',
-    'with',
-    'your',
-  ])
-  const meaningfulWords = withoutQuestionPrefix
-    .split(' ')
-    .map((word) => word.replace(/^[^\w]+|[^\w]+$/g, ''))
-    .filter((word) => word.length > 0 && !stopWords.has(word.toLowerCase()))
-  const words = meaningfulWords.length > 0 ? meaningfulWords : trimmed.split(' ')
-  const candidate = words.slice(0, 4).join(' ')
-  const normalized = candidate.length <= 34 ? candidate : candidate.slice(0, 31)
-  const wasTruncated =
-    words.length > 4 ||
-    normalized.length < candidate.length ||
-    withoutQuestionPrefix.length < trimmed.length
-
-  return wasTruncated ? `${normalized.replace(/[.,;:!?-]+$/, '')}...` : normalized
-}
 
 function formatScopeLabel(titles: string[]): string {
   if (titles.length === 0) return ''

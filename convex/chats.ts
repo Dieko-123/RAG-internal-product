@@ -240,11 +240,11 @@ export const internalRecordChatExchange = internalMutation({
 
     await ctx.db.patch(chatSessionId, { updatedAt: now })
 
-    if (isFirstExchange && !args.refusal) {
+    if (isFirstExchange) {
       await ctx.scheduler.runAfter(0, internal.gemini.internalGenerateChatTitle, {
         chatSessionId,
         question: args.question,
-        answerText: args.answerText,
+        answerText: args.refusal ? '' : args.answerText,
       })
     }
 
@@ -472,11 +472,11 @@ export const internalRecordMultiManualExchange = internalMutation({
 
     await ctx.db.patch(args.chatSessionId, { updatedAt: now })
 
-    if (isFirstExchange && !args.refusal) {
+    if (isFirstExchange) {
       await ctx.scheduler.runAfter(0, internal.gemini.internalGenerateChatTitle, {
         chatSessionId: args.chatSessionId,
         question: args.question,
-        answerText: args.answerText,
+        answerText: args.refusal ? '' : args.answerText,
       })
     }
 

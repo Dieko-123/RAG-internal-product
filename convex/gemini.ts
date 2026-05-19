@@ -1215,7 +1215,7 @@ export const internalGenerateChatTitle = internalAction({
       if (!apiKey) return
 
       const model =
-        process.env.CHAT_TITLE_MODEL?.trim() || 'gemini-2.5-flash-lite'
+        process.env.CHAT_TITLE_MODEL?.trim() || 'gemini-2.5-flash'
 
       const ai = new GoogleGenAI({ apiKey })
       const prompt = TITLE_GENERATION_PROMPT(
