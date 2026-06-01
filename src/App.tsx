@@ -2411,9 +2411,9 @@ function BrandMark({
   compact?: boolean
   organizationSlug?: string
 }) {
-  const isDemoOrganization = organizationSlug === demoOrganizationSlug
-  const logoUrl = isDemoOrganization ? prettiflowLogoUrl : execuJetLogoUrl
-  const logoAlt = isDemoOrganization ? 'Prettiflow' : 'ExecuJet'
+  const useExecuJetLogo = organizationSlug !== undefined && organizationSlug !== demoOrganizationSlug
+  const logoUrl = useExecuJetLogo ? execuJetLogoUrl : prettiflowLogoUrl
+  const logoAlt = useExecuJetLogo ? 'ExecuJet' : 'Prettiflow'
 
   return (
     <div className={compact ? 'brand-mark compact' : 'brand-mark'}>
