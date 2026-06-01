@@ -25,6 +25,8 @@ import type { Id } from '../convex/_generated/dataModel'
 import './App.css'
 
 const execuJetLogoUrl = `${import.meta.env.BASE_URL}execujet-aviation-nigeria-logo.png`
+const prettiflowLogoUrl = `${import.meta.env.BASE_URL}prettiflow-logo.png`
+const demoOrganizationSlug = 'cohort-demo-organization'
 
 type View = 'chat' | 'documents' | 'admin'
 
@@ -410,7 +412,10 @@ function SignedInShell() {
     >
       <aside className="sidebar">
         <div className="sidebar-topbar">
-          <BrandMark compact={sidebarCollapsed} />
+          <BrandMark
+            compact={sidebarCollapsed}
+            organizationSlug={activeOrganization.slug}
+          />
           <button
             type="button"
             className="sidebar-toggle"
@@ -2399,10 +2404,20 @@ function formatScopeLabel(titles: string[]): string {
   return candidate.length <= 38 ? candidate : `${first.slice(0, 22)}… + ${rest} document${rest !== 1 ? 's' : ''}`
 }
 
-function BrandMark({ compact = false }: { compact?: boolean }) {
+function BrandMark({
+  compact = false,
+  organizationSlug,
+}: {
+  compact?: boolean
+  organizationSlug?: string
+}) {
+  const isDemoOrganization = organizationSlug === demoOrganizationSlug
+  const logoUrl = isDemoOrganization ? prettiflowLogoUrl : execuJetLogoUrl
+  const logoAlt = isDemoOrganization ? 'Prettiflow' : 'ExecuJet'
+
   return (
     <div className={compact ? 'brand-mark compact' : 'brand-mark'}>
-      <img src={execuJetLogoUrl} alt="ExecuJet" />
+      <img src={logoUrl} alt={logoAlt} />
       <span>Manual Assistant</span>
     </div>
   )
