@@ -3,39 +3,41 @@ import { internalMutation, internalQuery, query } from './_generated/server'
 import type { Id } from './_generated/dataModel'
 import type { QueryCtx } from './_generated/server'
 import {
-  getDefaultOrganization,
   isAdminIdentity,
-  requireAllowedUser,
+  requireOrganizationMembership,
 } from './permissions'
 
 export const listInvites = query({
-  args: {},
-  handler: async (ctx) => {
-    const identity = await requireAllowedUser(ctx)
-    const organization = await getDefaultOrganization(ctx)
-    if (!organization) return []
+  args: {
+    organizationId: v.id('organizations'),
+  },
+  handler: async (ctx, args) => {
+    const { identity, organizationId } = await requireOrganizationMembership(
+      ctx,
+      args.organizationId,
+    )
 
     const isOrgLevel =
       isAdminIdentity(identity) ||
-      (await isOrgAdminOrOwner(ctx, organization._id, identity.tokenIdentifier))
+      (await isOrgAdminOrOwner(ctx, organizationId, identity.tokenIdentifier))
 
     if (isOrgLevel) {
       return await ctx.db
         .query('invites')
         .withIndex('by_organizationId_and_status', (q) =>
-          q.eq('organizationId', organization._id).eq('status', 'pending'),
+          q.eq('organizationId', organizationId).eq('status', 'pending'),
         )
         .order('desc')
         .collect()
     }
 
-    const deptAdminIds = await getDepartmentAdminIds(ctx, organization._id, identity.tokenIdentifier)
+    const deptAdminIds = await getDepartmentAdminIds(ctx, organizationId, identity.tokenIdentifier)
     if (deptAdminIds.size === 0) return []
 
     const allInvites = await ctx.db
       .query('invites')
       .withIndex('by_organizationId_and_status', (q) =>
-        q.eq('organizationId', organization._id).eq('status', 'pending'),
+        q.eq('organizationId', organizationId).eq('status', 'pending'),
       )
       .order('desc')
       .collect()
@@ -48,6 +50,7 @@ export const listInvites = query({
 
 export const internalRequireInvitePermission = internalQuery({
   args: {
+    organizationId: v.id('organizations'),
     departmentId: v.optional(v.id('departments')),
     targetRole: v.union(v.literal('org_admin'), v.literal('member'), v.literal('viewer')),
     targetDepartmentRole: v.optional(
@@ -55,27 +58,26 @@ export const internalRequireInvitePermission = internalQuery({
     ),
   },
   handler: async (ctx, args) => {
-    const identity = await requireAllowedUser(ctx)
-    const organization = await getDefaultOrganization(ctx)
-    if (!organization) {
-      throw new Error('Organization not configured.')
-    }
+    const { identity, organizationId } = await requireOrganizationMembership(
+      ctx,
+      args.organizationId,
+    )
 
     const isOrgLevel =
       isAdminIdentity(identity) ||
-      (await isOrgAdminOrOwner(ctx, organization._id, identity.tokenIdentifier))
+      (await isOrgAdminOrOwner(ctx, organizationId, identity.tokenIdentifier))
 
     if (isOrgLevel) {
       if (args.departmentId) {
         const dept = await ctx.db.get(args.departmentId)
-        if (!dept || dept.organizationId !== organization._id) {
+        if (!dept || dept.organizationId !== organizationId) {
           throw new Error('Department not found.')
         }
       }
 
       return {
         identity,
-        organizationId: organization._id,
+        organizationId,
         inviterRole: 'org_admin' as const,
         allowedDepartmentId: args.departmentId,
       }
@@ -86,7 +88,7 @@ export const internalRequireInvitePermission = internalQuery({
     }
 
     const dept = await ctx.db.get(args.departmentId)
-    if (!dept || dept.organizationId !== organization._id) {
+    if (!dept || dept.organizationId !== organizationId) {
       throw new Error('Department not found.')
     }
 
@@ -113,7 +115,7 @@ export const internalRequireInvitePermission = internalQuery({
 
     return {
       identity,
-      organizationId: organization._id,
+      organizationId,
       inviterRole: 'department_admin' as const,
       allowedDepartmentId: args.departmentId,
     }
@@ -124,22 +126,25 @@ export const internalGetPendingInviteByEmail = internalQuery({
   args: {
     emailNormalized: v.string(),
     organizationId: v.id('organizations'),
+    now: v.number(),
   },
+  returns: v.union(v.id('invites'), v.null()),
   handler: async (ctx, args) => {
     const invite = await ctx.db
       .query('invites')
-      .withIndex('by_emailNormalized_and_status', (q) =>
-        q.eq('emailNormalized', args.emailNormalized).eq('status', 'pending'),
+      .withIndex('by_organizationId_and_emailNormalized_and_status', (q) =>
+        q
+          .eq('organizationId', args.organizationId)
+          .eq('emailNormalized', args.emailNormalized)
+          .eq('status', 'pending'),
       )
       .first()
 
-    if (invite && invite.organizationId === args.organizationId) {
-      if (invite.expiresAt && invite.expiresAt < Date.now()) {
-        return null
-      }
-      return invite._id
+    if (invite?.expiresAt && invite.expiresAt < args.now) {
+      return null
     }
-    return null
+
+    return invite?._id ?? null
   },
 })
 
@@ -194,21 +199,23 @@ export const internalCreateInvite = internalMutation({
 
 export const internalRevokeInvite = internalMutation({
   args: {
+    organizationId: v.id('organizations'),
     inviteId: v.id('invites'),
   },
   handler: async (ctx, args) => {
-    const identity = await requireAllowedUser(ctx)
-    const organization = await getDefaultOrganization(ctx)
-    if (!organization) throw new Error('Organization not configured.')
+    const { identity, organizationId } = await requireOrganizationMembership(
+      ctx,
+      args.organizationId,
+    )
 
     const invite = await ctx.db.get(args.inviteId)
     if (!invite) throw new Error('Invite not found.')
-    if (invite.organizationId !== organization._id) throw new Error('Invite not found.')
+    if (invite.organizationId !== organizationId) throw new Error('Invite not found.')
     if (invite.status !== 'pending') throw new Error('Only pending invites can be revoked.')
 
     const isOrgLevel =
       isAdminIdentity(identity) ||
-      (await isOrgAdminOrOwner(ctx, organization._id, identity.tokenIdentifier))
+      (await isOrgAdminOrOwner(ctx, organizationId, identity.tokenIdentifier))
 
     if (!isOrgLevel) {
       if (!invite.departmentId || invite.role === 'org_admin') {
@@ -253,15 +260,19 @@ export const internalAcceptInvite = internalMutation({
     userTokenIdentifier: v.string(),
     organizationId: v.id('organizations'),
   },
+  returns: v.boolean(),
   handler: async (ctx, args) => {
     const invite = await ctx.db
       .query('invites')
-      .withIndex('by_emailNormalized_and_status', (q) =>
-        q.eq('emailNormalized', args.emailNormalized).eq('status', 'pending'),
+      .withIndex('by_organizationId_and_emailNormalized_and_status', (q) =>
+        q
+          .eq('organizationId', args.organizationId)
+          .eq('emailNormalized', args.emailNormalized)
+          .eq('status', 'pending'),
       )
       .first()
 
-    if (!invite || invite.organizationId !== args.organizationId) {
+    if (!invite) {
       return false
     }
 

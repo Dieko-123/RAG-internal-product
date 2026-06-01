@@ -8,6 +8,7 @@ import { action, internalAction } from './_generated/server'
 
 export const inviteUser = action({
   args: {
+    organizationId: v.id('organizations'),
     email: v.string(),
     role: v.union(v.literal('org_admin'), v.literal('member'), v.literal('viewer')),
     departmentId: v.optional(v.id('departments')),
@@ -15,6 +16,11 @@ export const inviteUser = action({
       v.union(v.literal('department_admin'), v.literal('member'), v.literal('viewer')),
     ),
   },
+  returns: v.object({
+    inviteId: v.id('invites'),
+    clerkInvitationId: v.optional(v.string()),
+    userAlreadyExists: v.boolean(),
+  }),
   handler: async (ctx, args) => {
     const permission: {
       identity: { tokenIdentifier: string }
@@ -22,6 +28,7 @@ export const inviteUser = action({
       inviterRole: 'org_admin' | 'department_admin'
       allowedDepartmentId?: Id<'departments'>
     } = await ctx.runQuery(internal.invitesQueries.internalRequireInvitePermission, {
+      organizationId: args.organizationId,
       departmentId: args.departmentId,
       targetRole: args.role,
       targetDepartmentRole: args.departmentRole,
@@ -49,6 +56,7 @@ export const inviteUser = action({
       {
         emailNormalized,
         organizationId: permission.organizationId,
+        now: Date.now(),
       },
     )
 
@@ -109,14 +117,16 @@ export const inviteUser = action({
 
 export const revokeInvite = action({
   args: {
+    organizationId: v.id('organizations'),
     inviteId: v.id('invites'),
   },
+  returns: v.object({ success: v.boolean() }),
   handler: async (ctx, args) => {
     const result: {
       clerkInvitationId?: string
     } = await ctx.runMutation(
       internal.invitesQueries.internalRevokeInvite,
-      { inviteId: args.inviteId },
+      { organizationId: args.organizationId, inviteId: args.inviteId },
     )
 
     if (result.clerkInvitationId) {
@@ -141,6 +151,7 @@ export const internalAcceptMatchingInvite = internalAction({
     userTokenIdentifier: v.string(),
     organizationId: v.id('organizations'),
   },
+  returns: v.boolean(),
   handler: async (ctx, args): Promise<boolean> => {
     const emailNormalized = args.email.trim().toLowerCase()
 

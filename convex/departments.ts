@@ -1,23 +1,17 @@
 import { v } from 'convex/values'
 import { mutation, query } from './_generated/server'
-import { requireAllowedUser, requireOrgAdmin } from './permissions'
+import { requireOrganizationMembership, requireOrgAdmin } from './permissions'
 
 export const listDepartments = query({
-  args: {},
-  handler: async (ctx) => {
-    await requireAllowedUser(ctx)
-    const organization = await ctx.db
-      .query('organizations')
-      .withIndex('by_slug', (q) => q.eq('slug', 'execujet-aviation-nigeria'))
-      .unique()
-
-    if (!organization) {
-      return []
-    }
+  args: {
+    organizationId: v.id('organizations'),
+  },
+  handler: async (ctx, args) => {
+    await requireOrganizationMembership(ctx, args.organizationId)
 
     const departments = await ctx.db
       .query('departments')
-      .withIndex('by_organizationId', (q) => q.eq('organizationId', organization._id))
+      .withIndex('by_organizationId', (q) => q.eq('organizationId', args.organizationId))
       .collect()
 
     return departments.filter((d) => d.status !== 'archived')
@@ -26,10 +20,11 @@ export const listDepartments = query({
 
 export const createDepartment = mutation({
   args: {
+    organizationId: v.id('organizations'),
     name: v.string(),
   },
   handler: async (ctx, args) => {
-    const { organizationId } = await requireOrgAdmin(ctx)
+    const { organizationId } = await requireOrgAdmin(ctx, args.organizationId)
     const name = args.name.trim()
 
     if (!name) {
@@ -62,10 +57,11 @@ export const createDepartment = mutation({
 
 export const archiveDepartment = mutation({
   args: {
+    organizationId: v.id('organizations'),
     departmentId: v.id('departments'),
   },
   handler: async (ctx, args) => {
-    const { identity, organizationId } = await requireOrgAdmin(ctx)
+    const { identity, organizationId } = await requireOrgAdmin(ctx, args.organizationId)
     const now = Date.now()
     const department = await ctx.db.get(args.departmentId)
 
@@ -114,11 +110,12 @@ export const archiveDepartment = mutation({
 
 export const removeDepartmentMembership = mutation({
   args: {
+    organizationId: v.id('organizations'),
     departmentId: v.id('departments'),
     userTokenIdentifier: v.string(),
   },
   handler: async (ctx, args) => {
-    const { identity, organizationId } = await requireOrgAdmin(ctx)
+    const { identity, organizationId } = await requireOrgAdmin(ctx, args.organizationId)
     const now = Date.now()
     const department = await ctx.db.get(args.departmentId)
 
@@ -157,10 +154,16 @@ export const removeDepartmentMembership = mutation({
 
 export const listDepartmentMembers = query({
   args: {
+    organizationId: v.id('organizations'),
     departmentId: v.id('departments'),
   },
   handler: async (ctx, args) => {
-    await requireOrgAdmin(ctx)
+    const { organizationId } = await requireOrgAdmin(ctx, args.organizationId)
+    const department = await ctx.db.get(args.departmentId)
+
+    if (!department || department.organizationId !== organizationId) {
+      throw new Error('Department not found.')
+    }
 
     return await ctx.db
       .query('memberships')

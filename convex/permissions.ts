@@ -22,6 +22,11 @@ export type MembershipRole =
   | 'member'
   | 'viewer'
 
+export type OrgScopedPermission = {
+  identity: SafeIdentity
+  organizationId: Id<'organizations'>
+}
+
 export async function requireUser(ctx: AuthCtx): Promise<SafeIdentity> {
   const identity = await ctx.auth.getUserIdentity()
 
@@ -95,27 +100,50 @@ export async function ensureUserAndMembership(
   overrides?: { emailOverride?: string; nameOverride?: string },
 ) {
   const identity = await requireUser(ctx)
+  const now = Date.now()
+  const email = (overrides?.emailOverride ?? identity.email)?.toLowerCase()?.trim()
+  const name = overrides?.nameOverride ?? identity.name ?? undefined
+  const existingUser = await ctx.db
+    .query('users')
+    .withIndex('by_tokenIdentifier', (q) =>
+      q.eq('tokenIdentifier', identity.tokenIdentifier),
+    )
+    .unique()
+  let targetOrganizationId: Id<'organizations'> | null = null
+  let targetRole: MembershipRole = isAdminIdentity(identity) ? 'org_admin' : 'member'
+  let pendingInvite:
+    | {
+        organizationId: Id<'organizations'>
+        role: 'org_admin' | 'member' | 'viewer'
+      }
+    | null = null
 
   if (!isAdminIdentity(identity) && !isAllowedIdentity(identity)) {
-    const existingUser = await ctx.db
-      .query('users')
-      .withIndex('by_tokenIdentifier', (q) =>
-        q.eq('tokenIdentifier', identity.tokenIdentifier),
-      )
-      .unique()
-
     if (existingUser?.status === 'active') {
-      // Already onboarded via invite — allow through
+      const existingMembership = await ctx.db
+        .query('memberships')
+        .withIndex('by_userTokenIdentifier', (q) =>
+          q.eq('userTokenIdentifier', identity.tokenIdentifier),
+        )
+        .collect()
+      const membership =
+        existingMembership.find((m) => m.departmentId === undefined) ??
+        existingMembership[0]
+
+      if (!membership) {
+        throw new Error('Not authorized for this internal app.')
+      }
+
+      targetOrganizationId = membership.organizationId
+      targetRole = membership.role
     } else if (existingUser?.status === 'suspended') {
       throw new Error('Not authorized for this internal app.')
     } else {
-      const authenticatedEmail = (identity.email ?? overrides?.emailOverride)?.toLowerCase()?.trim()
-      if (authenticatedEmail) {
-        const now = Date.now()
+      if (email) {
         const pendingInvites = await ctx.db
           .query('invites')
           .withIndex('by_emailNormalized_and_status', (q) =>
-            q.eq('emailNormalized', authenticatedEmail).eq('status', 'pending'),
+            q.eq('emailNormalized', email).eq('status', 'pending'),
           )
           .collect()
 
@@ -126,26 +154,38 @@ export async function ensureUserAndMembership(
         if (!validInvite) {
           throw new Error('Not authorized for this internal app.')
         }
+
+        pendingInvite = {
+          organizationId: validInvite.organizationId,
+          role: validInvite.role,
+        }
+        targetOrganizationId = validInvite.organizationId
+        targetRole = validInvite.role
       } else {
         throw new Error('Not authorized for this internal app.')
       }
     }
   }
 
-  const organizationId = await getOrCreateDefaultOrganization(ctx)
-  const now = Date.now()
-  const email = (overrides?.emailOverride ?? identity.email)?.toLowerCase()
-  const name = overrides?.nameOverride ?? identity.name ?? undefined
-  const role: MembershipRole = isAdminIdentity(identity)
-    ? 'org_admin'
-    : 'member'
+  if (!targetOrganizationId) {
+    const existingMembership = await ctx.db
+      .query('memberships')
+      .withIndex('by_userTokenIdentifier', (q) =>
+        q.eq('userTokenIdentifier', identity.tokenIdentifier),
+      )
+      .collect()
+    const membership =
+      existingMembership.find((m) => m.departmentId === undefined) ??
+      existingMembership[0]
 
-  const existingUser = await ctx.db
-    .query('users')
-    .withIndex('by_tokenIdentifier', (q) =>
-      q.eq('tokenIdentifier', identity.tokenIdentifier),
-    )
-    .unique()
+    if (membership) {
+      targetOrganizationId = membership.organizationId
+      targetRole = membership.role
+    } else {
+      targetOrganizationId = await getOrCreateDefaultOrganization(ctx)
+      targetRole = isAdminIdentity(identity) ? 'org_admin' : 'member'
+    }
+  }
 
   if (existingUser) {
     await ctx.db.patch(existingUser._id, {
@@ -168,24 +208,27 @@ export async function ensureUserAndMembership(
     .query('memberships')
     .withIndex('by_organizationId_and_userTokenIdentifier', (q) =>
       q
-        .eq('organizationId', organizationId)
+        .eq('organizationId', targetOrganizationId)
         .eq('userTokenIdentifier', identity.tokenIdentifier),
     )
     .filter((q) => q.eq(q.field('departmentId'), undefined))
     .unique()
 
   if (existingMembership) {
-    if (existingMembership.role !== role && role === 'org_admin') {
+    if (
+      existingMembership.role !== targetRole &&
+      (targetRole === 'org_admin' || pendingInvite)
+    ) {
       await ctx.db.patch(existingMembership._id, {
-        role,
+        role: targetRole,
         updatedAt: now,
       })
     }
   } else {
     await ctx.db.insert('memberships', {
-      organizationId,
+      organizationId: targetOrganizationId,
       userTokenIdentifier: identity.tokenIdentifier,
-      role,
+      role: targetRole,
       createdAt: now,
       updatedAt: now,
     })
@@ -193,34 +236,42 @@ export async function ensureUserAndMembership(
 
   return {
     identity,
-    organizationId,
-    role,
+    organizationId: targetOrganizationId,
+    role: targetRole,
   }
 }
 
 export async function requireOrgAdmin(ctx: DbCtx): Promise<{
   identity: SafeIdentity
   organizationId: Id<'organizations'>
+}>
+export async function requireOrgAdmin(
+  ctx: DbCtx,
+  organizationId: Id<'organizations'>,
+): Promise<{
+  identity: SafeIdentity
+  organizationId: Id<'organizations'>
+}>
+export async function requireOrgAdmin(
+  ctx: DbCtx,
+  organizationId?: Id<'organizations'>,
+): Promise<{
+  identity: SafeIdentity
+  organizationId: Id<'organizations'>
 }> {
   const identity = await requireAllowedUser(ctx)
-  const organization = await getDefaultOrganization(ctx)
+  const resolvedOrganizationId =
+    organizationId ?? (await getDefaultOrganization(ctx))?._id
 
-  if (!organization) {
-    throw new Error('Default organization is not configured.')
-  }
-
-  if (isAdminIdentity(identity)) {
-    return {
-      identity,
-      organizationId: organization._id,
-    }
+  if (!resolvedOrganizationId) {
+    throw new Error('Organization is not configured.')
   }
 
   const memberships = await ctx.db
     .query('memberships')
     .withIndex('by_organizationId_and_userTokenIdentifier', (q) =>
       q
-        .eq('organizationId', organization._id)
+        .eq('organizationId', resolvedOrganizationId)
         .eq('userTokenIdentifier', identity.tokenIdentifier),
     )
     .collect()
@@ -230,13 +281,44 @@ export async function requireOrgAdmin(ctx: DbCtx): Promise<{
       (membership.role === 'owner' || membership.role === 'org_admin'),
   )
 
-  if (!hasOrgAdminRole) {
+  if (!isAdminIdentity(identity) && !hasOrgAdminRole) {
     throw new Error('Admin access required')
   }
 
   return {
     identity,
-    organizationId: organization._id,
+    organizationId: resolvedOrganizationId,
+  }
+}
+
+export async function requireOrganizationMembership(
+  ctx: DbCtx,
+  organizationId: Id<'organizations'>,
+): Promise<OrgScopedPermission & { roles: MembershipRole[] }> {
+  const identity = await requireAllowedUser(ctx)
+  const organization = await ctx.db.get(organizationId)
+
+  if (!organization) {
+    throw new Error('Organization not found.')
+  }
+
+  const memberships = await ctx.db
+    .query('memberships')
+    .withIndex('by_organizationId_and_userTokenIdentifier', (q) =>
+      q
+        .eq('organizationId', organizationId)
+        .eq('userTokenIdentifier', identity.tokenIdentifier),
+    )
+    .collect()
+
+  if (!isAdminIdentity(identity) && memberships.length === 0) {
+    throw new Error('Organization not found.')
+  }
+
+  return {
+    identity,
+    organizationId,
+    roles: memberships.map((membership) => membership.role),
   }
 }
 
@@ -296,6 +378,7 @@ export type UploadPermissionResult = {
 export async function requireManualUploadPermission(
   ctx: DbCtx,
   opts: {
+    organizationId: Id<'organizations'>
     visibility: 'org' | 'department' | 'restricted'
     departmentId?: Id<'departments'>
   },
@@ -305,17 +388,17 @@ export async function requireManualUploadPermission(
   }
 
   const identity = await requireAllowedUser(ctx)
-  const organization = await getDefaultOrganization(ctx)
+  const organization = await ctx.db.get(opts.organizationId)
 
   if (!organization) {
-    throw new Error('Default organization is not configured.')
+    throw new Error('Organization not found.')
   }
 
   const orgMemberships = await ctx.db
     .query('memberships')
     .withIndex('by_organizationId_and_userTokenIdentifier', (q) =>
       q
-        .eq('organizationId', organization._id)
+        .eq('organizationId', opts.organizationId)
         .eq('userTokenIdentifier', identity.tokenIdentifier),
     )
     .collect()
@@ -326,17 +409,21 @@ export async function requireManualUploadPermission(
       (m.role === 'owner' || m.role === 'org_admin'),
   )
 
+  if (!isAdminIdentity(identity) && orgMemberships.length === 0) {
+    throw new Error('Organization not found.')
+  }
+
   if (isAdminIdentity(identity) || isOrgLevel) {
     if (opts.visibility === 'department' && opts.departmentId) {
       const dept = await ctx.db.get(opts.departmentId)
-      if (!dept || dept.organizationId !== organization._id) {
+      if (!dept || dept.organizationId !== opts.organizationId) {
         throw new Error('Department not found in this organization.')
       }
     }
 
     return {
       identity,
-      organizationId: organization._id,
+      organizationId: opts.organizationId,
       effectiveVisibility: opts.visibility,
       effectiveDepartmentId: opts.visibility === 'department' ? opts.departmentId : undefined,
     }
@@ -351,7 +438,7 @@ export async function requireManualUploadPermission(
   }
 
   const dept = await ctx.db.get(opts.departmentId)
-  if (!dept || dept.organizationId !== organization._id) {
+  if (!dept || dept.organizationId !== opts.organizationId) {
     throw new Error('Department not found in this organization.')
   }
 
@@ -370,7 +457,7 @@ export async function requireManualUploadPermission(
 
   return {
     identity,
-    organizationId: organization._id,
+    organizationId: opts.organizationId,
     effectiveVisibility: 'department',
     effectiveDepartmentId: opts.departmentId,
   }

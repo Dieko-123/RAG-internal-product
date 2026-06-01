@@ -40,6 +40,18 @@ type Citation = {
   providerUri?: string
 }
 
+const citationValidator = v.object({
+  title: v.optional(v.string()),
+  uri: v.optional(v.string()),
+  pageNumber: v.optional(v.number()),
+  excerpt: v.optional(v.string()),
+  fileSearchStore: v.optional(v.string()),
+  manualId: v.optional(v.string()),
+  manualVersionId: v.optional(v.string()),
+  sourceFileName: v.optional(v.string()),
+  providerUri: v.optional(v.string()),
+})
+
 type GeminiCustomMetadata = Array<{
   key: string
   stringValue: string
@@ -99,17 +111,23 @@ type AskManualQuestionResult = {
 }
 
 export const ingestDummyManual = action({
-  args: {},
-  handler: async (ctx): Promise<IngestDummyManualResult> => {
+  args: {
+    organizationId: v.id('organizations'),
+  },
+  handler: async (ctx, args): Promise<IngestDummyManualResult> => {
     const admin = await requireAdmin(ctx)
     const apiKey = readRequiredEnv('GEMINI_API_KEY')
     const ai = new GoogleGenAI({ apiKey })
 
-    const orgId = await getOrgIdForUser(ctx)
+    const orgId = args.organizationId
+    await ctx.runQuery(internal.users.internalRequireOrganizationMembership, {
+      organizationId: orgId,
+    })
 
     const manualId: Id<'manuals'> = await ctx.runMutation(
       internal.manuals.internalCreateManualIfMissing,
       {
+        organizationId: orgId,
         title: DUMMY_MANUAL_TITLE,
         slug: DUMMY_MANUAL_SLUG,
         actorTokenIdentifier: admin.tokenIdentifier,
@@ -246,6 +264,7 @@ export const ingestDummyManual = action({
 
 export const ingestUploadedManual = action({
   args: {
+    organizationId: v.id('organizations'),
     storageId: v.id('_storage'),
     title: v.string(),
     sourceFileName: v.string(),
@@ -258,7 +277,7 @@ export const ingestUploadedManual = action({
     const visibility = args.visibility ?? 'org'
     const permission = await ctx.runQuery(
       internal.users.internalRequireManualUploadPermission,
-      { visibility, departmentId: args.departmentId },
+      { organizationId: args.organizationId, visibility, departmentId: args.departmentId },
     )
     const fileInfo = validateManualUpload(args)
     const slug = slugify(fileInfo.title)
@@ -266,6 +285,7 @@ export const ingestUploadedManual = action({
     const manualId: Id<'manuals'> = await ctx.runMutation(
       internal.manuals.internalCreateManualIfMissing,
       {
+        organizationId: permission.organizationId,
         title: fileInfo.title,
         slug,
         actorTokenIdentifier: permission.identity.tokenIdentifier,
@@ -319,10 +339,13 @@ export const ingestUploadedManual = action({
 
 export const retryIndexing = action({
   args: {
+    organizationId: v.id('organizations'),
     ingestionJobId: v.id('ingestionJobs'),
   },
   handler: async (ctx, args): Promise<RetryIndexingResult> => {
-    const admin = await ctx.runQuery(internal.users.internalRequireOrgAdmin, {})
+    const admin = await ctx.runQuery(internal.users.internalRequireOrgAdmin, {
+      organizationId: args.organizationId,
+    })
     const job = await ctx.runMutation(
       internal.ingestionJobs.internalPrepareRetry,
       {
@@ -658,7 +681,7 @@ export const internalRecoverStuckJobs = internalAction({
       nextPollAt?: number
     }> = await ctx.runQuery(
       internal.ingestionJobs.internalGetStuckUploadingJobs,
-      { olderThanMs: STUCK_UPLOADING_TIMEOUT_MS },
+      { cutoff: Date.now() - STUCK_UPLOADING_TIMEOUT_MS, batchSize: 100 },
     )
 
     for (const job of stuckJobs) {
@@ -696,12 +719,26 @@ export const internalRecoverStuckJobs = internalAction({
 
 export const askManualQuestion = action({
   args: {
+    organizationId: v.id('organizations'),
     question: v.string(),
     chatSessionId: v.optional(v.id('chatSessions')),
     manualId: v.optional(v.id('manuals')),
   },
+  returns: v.object({
+    chatSessionId: v.id('chatSessions'),
+    answerText: v.string(),
+    refusal: v.boolean(),
+    citations: v.array(citationValidator),
+    latencyMs: v.number(),
+    model: v.string(),
+    manualTitle: v.string(),
+    sourceFileName: v.string(),
+  }),
   handler: async (ctx, args): Promise<AskManualQuestionResult> => {
     const user = await ctx.runQuery(internal.users.internalRequireAllowedUser, {})
+    await ctx.runQuery(internal.users.internalRequireOrganizationMembership, {
+      organizationId: args.organizationId,
+    })
     const question = args.question.trim()
 
     if (!question) {
@@ -710,7 +747,7 @@ export const askManualQuestion = action({
 
     const activeManual: ActiveManual = await ctx.runQuery(
       internal.manuals.internalGetManualForQuestion,
-      { manualId: args.manualId },
+      { organizationId: args.organizationId, manualId: args.manualId },
     )
 
     if (!activeManual) {
@@ -796,6 +833,7 @@ export const askManualQuestion = action({
       {
         chatSessionId: args.chatSessionId,
         userTokenIdentifier: user.tokenIdentifier,
+        organizationId: args.organizationId,
         manualId: activeManual.manual._id,
         manualVersionId: activeManual.version._id,
         title: question,
@@ -925,12 +963,37 @@ type DebugGeminiRetrievalResult = {
 
 export const askMultiManualQuestion = action({
   args: {
+    organizationId: v.id('organizations'),
     question: v.string(),
     chatSessionId: v.optional(v.id('chatSessions')),
     selectedManualIds: v.optional(v.array(v.id('manuals'))),
   },
+  returns: v.object({
+    chatSessionId: v.id('chatSessions'),
+    answerText: v.string(),
+    refusal: v.boolean(),
+    citations: v.array(citationValidator),
+    warning: v.optional(v.string()),
+    effectiveManualIds: v.array(v.string()),
+    effectiveManualVersionIds: v.array(v.string()),
+    excludedManuals: v.optional(
+      v.array(
+        v.object({
+          manualId: v.string(),
+          manualVersionId: v.optional(v.string()),
+          title: v.optional(v.string()),
+          reason: v.string(),
+        }),
+      ),
+    ),
+    latencyMs: v.number(),
+    model: v.string(),
+  }),
   handler: async (ctx, args): Promise<MultiManualQuestionResult> => {
     const user = await ctx.runQuery(internal.users.internalRequireAllowedUser, {})
+    await ctx.runQuery(internal.users.internalRequireOrganizationMembership, {
+      organizationId: args.organizationId,
+    })
     const question = args.question.trim()
     if (!question) {
       throw new Error('Question is required')
@@ -948,6 +1011,7 @@ export const askMultiManualQuestion = action({
       } = await ctx.runQuery(internal.chats.internalGetLockedScope, {
         chatSessionId,
         userTokenIdentifier: user.tokenIdentifier,
+        organizationId: args.organizationId,
       })
       selectedManualVersionIds = lockedScope.selectedManualVersionIds
     } else {
@@ -959,7 +1023,7 @@ export const askMultiManualQuestion = action({
         throw new Error('Select at most 30 manuals.')
       }
 
-      const orgId = await getOrgIdForUser(ctx)
+      const orgId = args.organizationId
 
       const lockResult: {
         chatSessionId: Id<'chatSessions'>
@@ -1001,6 +1065,7 @@ export const askMultiManualQuestion = action({
       organizationId: Id<'organizations'>
       orgStoreName?: string
     } = await ctx.runQuery(internal.manuals.internalGetManualVersionsForScope, {
+      organizationId: args.organizationId,
       manualVersionIds: selectedManualVersionIds,
       userTokenIdentifier: user.tokenIdentifier,
     })
@@ -1021,6 +1086,7 @@ export const askMultiManualQuestion = action({
       await ctx.runMutation(internal.chats.internalRecordMultiManualExchange, {
         chatSessionId: chatSessionId!,
         userTokenIdentifier: user.tokenIdentifier,
+        organizationId: args.organizationId,
         title: question,
         question,
         answerText: errorResult.answerText,
@@ -1149,6 +1215,7 @@ export const askMultiManualQuestion = action({
     const recordArgs: {
       chatSessionId: Id<'chatSessions'>
       userTokenIdentifier: string
+      organizationId: Id<'organizations'>
       title: string
       question: string
       answerText: string
@@ -1161,6 +1228,7 @@ export const askMultiManualQuestion = action({
     } = {
       chatSessionId: chatSessionId!,
       userTokenIdentifier: user.tokenIdentifier,
+      organizationId: args.organizationId,
       title: question,
       question,
       answerText,
@@ -1333,6 +1401,7 @@ export const backfillChatTitles = action({
 
 export const debugGeminiRetrievalForManual = action({
   args: {
+    organizationId: v.id('organizations'),
     manualId: v.optional(v.id('manuals')),
     manualVersionId: v.optional(v.id('manualVersions')),
     testQuestion: v.string(),
@@ -1340,6 +1409,9 @@ export const debugGeminiRetrievalForManual = action({
   },
   handler: async (ctx, args): Promise<DebugGeminiRetrievalResult> => {
     const admin = await requireAdmin(ctx)
+    await ctx.runQuery(internal.users.internalRequireOrganizationMembership, {
+      organizationId: args.organizationId,
+    })
     const question = args.testQuestion.trim()
     if (!question) {
       throw new Error('Test question is required.')
@@ -1351,6 +1423,7 @@ export const debugGeminiRetrievalForManual = action({
     const debugState: RetrievalDebugState = await ctx.runQuery(
       internal.manuals.internalGetRetrievalDebugState,
       {
+        organizationId: args.organizationId,
         manualId: args.manualId,
         manualVersionId: args.manualVersionId,
       },
@@ -1367,6 +1440,7 @@ export const debugGeminiRetrievalForManual = action({
       organizationId: Id<'organizations'>
       orgStoreName?: string
     } = await ctx.runQuery(internal.manuals.internalGetManualVersionsForScope, {
+      organizationId: args.organizationId,
       manualVersionIds: [debugState.manualVersion._id],
       userTokenIdentifier: admin.tokenIdentifier,
     })
@@ -1586,17 +1660,6 @@ export const debugGeminiRetrievalForManual = action({
     }
   },
 })
-
-async function getOrgIdForUser(ctx: ActionCtx): Promise<Id<'organizations'>> {
-  const orgId: Id<'organizations'> | null = await ctx.runQuery(
-    internal.users.internalGetDefaultOrgId,
-    {},
-  )
-  if (!orgId) {
-    throw new Error('Organization not configured.')
-  }
-  return orgId
-}
 
 type EffectiveVersion = {
   manualId: Id<'manuals'>

@@ -326,16 +326,16 @@ export const internalGetLatestJobsByManualIds = internalQuery({
 
 export const internalGetStuckUploadingJobs = internalQuery({
   args: {
-    olderThanMs: v.number(),
+    cutoff: v.number(),
+    batchSize: v.number(),
   },
   handler: async (ctx, args) => {
-    const cutoff = Date.now() - args.olderThanMs
     const uploadingJobs = await ctx.db
       .query('ingestionJobs')
       .withIndex('by_status', (q) => q.eq('status', 'uploading'))
-      .collect()
+      .take(args.batchSize)
 
-    return uploadingJobs.filter((job) => job.updatedAt < cutoff)
+    return uploadingJobs.filter((job) => job.updatedAt < args.cutoff)
   },
 })
 

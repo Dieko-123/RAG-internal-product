@@ -117,6 +117,7 @@ export default defineSchema({
     .index('by_slug', ['slug'])
     .index('by_status', ['status'])
     .index('by_organizationId', ['organizationId'])
+    .index('by_organizationId_and_slug', ['organizationId', 'slug'])
     .index('by_departmentId', ['departmentId'])
     .index('by_organizationId_and_status', ['organizationId', 'status']),
 
@@ -222,6 +223,16 @@ export default defineSchema({
       'userTokenIdentifier',
       'pinned',
     ])
+    .index('by_userTokenIdentifier_and_organizationId_and_updatedAt', [
+      'userTokenIdentifier',
+      'organizationId',
+      'updatedAt',
+    ])
+    .index('by_userTokenIdentifier_and_organizationId_and_pinned', [
+      'userTokenIdentifier',
+      'organizationId',
+      'pinned',
+    ])
     .index('by_manualId', ['manualId']),
 
   chatMessages: defineTable({
@@ -265,6 +276,11 @@ export default defineSchema({
   })
     .index('by_organizationId', ['organizationId'])
     .index('by_emailNormalized_and_status', ['emailNormalized', 'status'])
+    .index('by_organizationId_and_emailNormalized_and_status', [
+      'organizationId',
+      'emailNormalized',
+      'status',
+    ])
     .index('by_organizationId_and_status', ['organizationId', 'status'])
     .index('by_departmentId', ['departmentId']),
 

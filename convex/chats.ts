@@ -4,8 +4,8 @@ import { internal } from './_generated/api'
 import type { MutationCtx } from './_generated/server'
 import type { Id } from './_generated/dataModel'
 import {
-  getDefaultOrganization,
   requireAllowedUser,
+  requireOrganizationMembership,
 } from './permissions'
 
 const citationValidator = v.object({
@@ -20,22 +20,32 @@ const citationValidator = v.object({
   providerUri: v.optional(v.string()),
 })
 
+const CHAT_DELETE_BATCH_SIZE = 100
+
 export const listChatSessions = query({
-  args: {},
-  handler: async (ctx) => {
+  args: {
+    organizationId: v.id('organizations'),
+  },
+  handler: async (ctx, args) => {
     const user = await requireAllowedUser(ctx)
+    await requireOrganizationMembership(ctx, args.organizationId)
 
     const recentSessions = await ctx.db
       .query('chatSessions')
-      .withIndex('by_userTokenIdentifier_and_updatedAt', (q) =>
-        q.eq('userTokenIdentifier', user.tokenIdentifier),
+      .withIndex('by_userTokenIdentifier_and_organizationId_and_updatedAt', (q) =>
+        q
+          .eq('userTokenIdentifier', user.tokenIdentifier)
+          .eq('organizationId', args.organizationId),
       )
       .order('desc')
       .take(40)
     const pinnedSessions = await ctx.db
       .query('chatSessions')
-      .withIndex('by_userTokenIdentifier_and_pinned', (q) =>
-        q.eq('userTokenIdentifier', user.tokenIdentifier).eq('pinned', true),
+      .withIndex('by_userTokenIdentifier_and_organizationId_and_pinned', (q) =>
+        q
+          .eq('userTokenIdentifier', user.tokenIdentifier)
+          .eq('organizationId', args.organizationId)
+          .eq('pinned', true),
       )
       .take(40)
     const sessionsById = new Map(
@@ -73,10 +83,12 @@ export const listChatSessions = query({
 
 export const listChatMessages = query({
   args: {
+    organizationId: v.id('organizations'),
     chatSessionId: v.optional(v.id('chatSessions')),
   },
   handler: async (ctx, args) => {
     const user = await requireAllowedUser(ctx)
+    await requireOrganizationMembership(ctx, args.organizationId)
 
     if (!args.chatSessionId) {
       return []
@@ -85,7 +97,11 @@ export const listChatMessages = query({
     const chatSessionId = args.chatSessionId
     const session = await ctx.db.get(chatSessionId)
 
-    if (!session || session.userTokenIdentifier !== user.tokenIdentifier) {
+    if (
+      !session ||
+      session.userTokenIdentifier !== user.tokenIdentifier ||
+      session.organizationId !== args.organizationId
+    ) {
       throw new Error('Chat not found')
     }
 
@@ -102,10 +118,13 @@ export const listChatMessages = query({
 })
 
 export const createChatSession = mutation({
-  args: {},
-  handler: async (ctx) => {
+  args: {
+    organizationId: v.id('organizations'),
+  },
+  handler: async (ctx, args) => {
     const user = await requireAllowedUser(ctx)
-    const activeManual = await getActiveManualRecord(ctx)
+    await requireOrganizationMembership(ctx, args.organizationId)
+    const activeManual = await getActiveManualRecord(ctx, args.organizationId)
 
     if (!activeManual) {
       throw new Error('No active manual is available yet.')
@@ -129,6 +148,7 @@ export const createChatSession = mutation({
 
 export const setChatPinned = mutation({
   args: {
+    organizationId: v.id('organizations'),
     chatSessionId: v.id('chatSessions'),
     pinned: v.boolean(),
   },
@@ -136,7 +156,11 @@ export const setChatPinned = mutation({
     const user = await requireAllowedUser(ctx)
     const session = await ctx.db.get(args.chatSessionId)
 
-    if (!session || session.userTokenIdentifier !== user.tokenIdentifier) {
+    if (
+      !session ||
+      session.userTokenIdentifier !== user.tokenIdentifier ||
+      session.organizationId !== args.organizationId
+    ) {
       throw new Error('Chat not found')
     }
 
@@ -149,23 +173,41 @@ export const setChatPinned = mutation({
 
 export const deleteChat = mutation({
   args: {
+    organizationId: v.id('organizations'),
     chatSessionId: v.id('chatSessions'),
   },
+  returns: v.null(),
   handler: async (ctx, args) => {
     const user = await requireAllowedUser(ctx)
     const session = await ctx.db.get(args.chatSessionId)
 
-    if (!session || session.userTokenIdentifier !== user.tokenIdentifier) {
+    if (
+      !session ||
+      session.userTokenIdentifier !== user.tokenIdentifier ||
+      session.organizationId !== args.organizationId
+    ) {
       throw new Error('Chat not found')
     }
 
-    const messages = await ctx.db
-      .query('chatMessages')
-      .withIndex('by_chatSessionId', (q) => q.eq('chatSessionId', args.chatSessionId))
-      .collect()
+    await deleteChatBatch(ctx, {
+      organizationId: args.organizationId,
+      chatSessionId: args.chatSessionId,
+      userTokenIdentifier: user.tokenIdentifier,
+    })
+    return null
+  },
+})
 
-    await Promise.all(messages.map((m) => ctx.db.delete(m._id)))
-    await ctx.db.delete(args.chatSessionId)
+export const internalDeleteChatMessages = internalMutation({
+  args: {
+    organizationId: v.id('organizations'),
+    chatSessionId: v.id('chatSessions'),
+    userTokenIdentifier: v.string(),
+  },
+  returns: v.null(),
+  handler: async (ctx, args) => {
+    await deleteChatBatch(ctx, args)
+    return null
   },
 })
 
@@ -173,6 +215,7 @@ export const internalRecordChatExchange = internalMutation({
   args: {
     chatSessionId: v.optional(v.id('chatSessions')),
     userTokenIdentifier: v.string(),
+    organizationId: v.id('organizations'),
     manualId: v.id('manuals'),
     manualVersionId: v.id('manualVersions'),
     title: v.string(),
@@ -194,11 +237,13 @@ export const internalRecordChatExchange = internalMutation({
       if (!session || session.userTokenIdentifier !== args.userTokenIdentifier) {
         throw new Error('Chat not found')
       }
+      if (session.organizationId !== args.organizationId) {
+        throw new Error('Chat not found')
+      }
     } else {
-      const manual = await ctx.db.get(args.manualId)
       chatSessionId = await ctx.db.insert('chatSessions', {
         userTokenIdentifier: args.userTokenIdentifier,
-        organizationId: manual?.organizationId,
+        organizationId: args.organizationId,
         scopeMode: 'selected',
         selectedManualIds: [args.manualId],
         selectedManualVersionIds: [args.manualVersionId],
@@ -282,6 +327,10 @@ export const internalLockChatScope = internalMutation({
           .eq('userTokenIdentifier', args.userTokenIdentifier),
       )
       .collect()
+
+    if (memberships.length === 0) {
+      throw new Error('Organization not found.')
+    }
 
     const isOrgLevel = memberships.some(
       (m) =>
@@ -380,10 +429,15 @@ export const internalGetLockedScope = internalQuery({
   args: {
     chatSessionId: v.id('chatSessions'),
     userTokenIdentifier: v.string(),
+    organizationId: v.id('organizations'),
   },
   handler: async (ctx, args) => {
     const session = await ctx.db.get(args.chatSessionId)
-    if (!session || session.userTokenIdentifier !== args.userTokenIdentifier) {
+    if (
+      !session ||
+      session.userTokenIdentifier !== args.userTokenIdentifier ||
+      session.organizationId !== args.organizationId
+    ) {
       throw new Error('Chat not found')
     }
 
@@ -410,6 +464,7 @@ export const internalRecordMultiManualExchange = internalMutation({
   args: {
     chatSessionId: v.id('chatSessions'),
     userTokenIdentifier: v.string(),
+    organizationId: v.id('organizations'),
     title: v.string(),
     question: v.string(),
     answerText: v.string(),
@@ -435,7 +490,11 @@ export const internalRecordMultiManualExchange = internalMutation({
   handler: async (ctx, args) => {
     const now = Date.now()
     const session = await ctx.db.get(args.chatSessionId)
-    if (!session || session.userTokenIdentifier !== args.userTokenIdentifier) {
+    if (
+      !session ||
+      session.userTokenIdentifier !== args.userTokenIdentifier ||
+      session.organizationId !== args.organizationId
+    ) {
       throw new Error('Chat not found')
     }
 
@@ -604,11 +663,50 @@ function cleanGeneratedTitle(raw: string): string {
   return stripped
 }
 
-async function getActiveManualRecord(ctx: MutationCtx) {
-  const organization = await getDefaultOrganization(ctx)
+async function deleteChatBatch(
+  ctx: MutationCtx,
+  args: {
+    organizationId: Id<'organizations'>
+    chatSessionId: Id<'chatSessions'>
+    userTokenIdentifier: string
+  },
+) {
+  const session = await ctx.db.get(args.chatSessionId)
+
+  if (
+    !session ||
+    session.userTokenIdentifier !== args.userTokenIdentifier ||
+    session.organizationId !== args.organizationId
+  ) {
+    return
+  }
+
+  const messages = await ctx.db
+    .query('chatMessages')
+    .withIndex('by_chatSessionId', (q) => q.eq('chatSessionId', args.chatSessionId))
+    .take(CHAT_DELETE_BATCH_SIZE)
+
+  for (const message of messages) {
+    await ctx.db.delete(message._id)
+  }
+
+  if (messages.length === CHAT_DELETE_BATCH_SIZE) {
+    await ctx.scheduler.runAfter(0, internal.chats.internalDeleteChatMessages, args)
+    return
+  }
+
+  await ctx.db.delete(args.chatSessionId)
+}
+
+async function getActiveManualRecord(
+  ctx: MutationCtx,
+  organizationId: Id<'organizations'>,
+) {
   const manual = await ctx.db
     .query('manuals')
-    .withIndex('by_status', (q) => q.eq('status', 'active'))
+    .withIndex('by_organizationId_and_status', (q) =>
+      q.eq('organizationId', organizationId).eq('status', 'active'),
+    )
     .order('desc')
     .first()
 
@@ -625,7 +723,7 @@ async function getActiveManualRecord(ctx: MutationCtx) {
   return {
     manual: {
       ...manual,
-      organizationId: manual.organizationId ?? organization?._id,
+      organizationId: manual.organizationId ?? organizationId,
       visibility: manual.visibility ?? 'org',
     },
     version: {

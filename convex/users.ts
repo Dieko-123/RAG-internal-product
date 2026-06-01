@@ -2,12 +2,14 @@ import { v } from 'convex/values'
 import { internalMutation, internalQuery, mutation, query } from './_generated/server'
 import {
   ensureUserAndMembership,
-  getDefaultOrganization,
+  getOrCreateDefaultOrganization,
   isAdminIdentity,
   requireManualUploadPermission,
+  requireOrganizationMembership,
   requireOrgAdmin,
   requireAllowedUser,
 } from './permissions'
+import type { Id } from './_generated/dataModel'
 
 function toSafeIdentity(identity: {
   subject: string
@@ -64,12 +66,15 @@ export const ensureCurrentUserAccess = mutation({
 
     const emailNormalized = (result.identity.email ?? args.email)?.toLowerCase()?.trim()
     if (emailNormalized) {
-      const pendingInvite = await ctx.db
+      const pendingInvites = await ctx.db
         .query('invites')
         .withIndex('by_emailNormalized_and_status', (q) =>
           q.eq('emailNormalized', emailNormalized).eq('status', 'pending'),
         )
-        .first()
+        .collect()
+      const pendingInvite = pendingInvites.find(
+        (invite) => invite.organizationId === result.organizationId,
+      )
 
       if (
         pendingInvite &&
@@ -158,22 +163,48 @@ export const ensureCurrentUserAccess = mutation({
 })
 
 export const listExistingUsersForAdmin = query({
-  args: {},
-  handler: async (ctx) => {
-    await requireOrgAdmin(ctx)
+  args: {
+    organizationId: v.id('organizations'),
+  },
+  handler: async (ctx, args) => {
+    await requireOrgAdmin(ctx, args.organizationId)
 
-    return await ctx.db.query('users').withIndex('by_email').collect()
+    const memberships = await ctx.db
+      .query('memberships')
+      .withIndex('by_organizationId', (q) =>
+        q.eq('organizationId', args.organizationId),
+      )
+      .collect()
+    const tokenIdentifiers = [
+      ...new Set(memberships.map((membership) => membership.userTokenIdentifier)),
+    ]
+    const users = []
+
+    for (const tokenIdentifier of tokenIdentifiers) {
+      const user = await ctx.db
+        .query('users')
+        .withIndex('by_tokenIdentifier', (q) =>
+          q.eq('tokenIdentifier', tokenIdentifier),
+        )
+        .unique()
+      if (user) {
+        users.push(user)
+      }
+    }
+
+    return users.sort((a, b) => (a.email ?? '').localeCompare(b.email ?? ''))
   },
 })
 
 export const assignUserToDepartment = mutation({
   args: {
+    organizationId: v.id('organizations'),
     userTokenIdentifier: v.string(),
     departmentId: v.id('departments'),
     role: v.union(v.literal('member'), v.literal('department_admin')),
   },
   handler: async (ctx, args) => {
-    const { identity, organizationId } = await requireOrgAdmin(ctx)
+    const { identity, organizationId } = await requireOrgAdmin(ctx, args.organizationId)
     const now = Date.now()
     const user = await ctx.db
       .query('users')
@@ -265,14 +296,28 @@ export const assignUserToDepartment = mutation({
 
 export const suspendUser = mutation({
   args: {
+    organizationId: v.id('organizations'),
     userId: v.id('users'),
   },
   handler: async (ctx, args) => {
-    const { identity, organizationId } = await requireOrgAdmin(ctx)
+    const { identity, organizationId } = await requireOrgAdmin(ctx, args.organizationId)
     const now = Date.now()
     const user = await ctx.db.get(args.userId)
 
     if (!user) {
+      throw new Error('User not found.')
+    }
+
+    const targetMembership = await ctx.db
+      .query('memberships')
+      .withIndex('by_organizationId_and_userTokenIdentifier', (q) =>
+        q
+          .eq('organizationId', organizationId)
+          .eq('userTokenIdentifier', user.tokenIdentifier),
+      )
+      .first()
+
+    if (!targetMembership) {
       throw new Error('User not found.')
     }
 
@@ -318,14 +363,28 @@ export const suspendUser = mutation({
 
 export const unsuspendUser = mutation({
   args: {
+    organizationId: v.id('organizations'),
     userId: v.id('users'),
   },
   handler: async (ctx, args) => {
-    const { identity } = await requireOrgAdmin(ctx)
+    const { identity, organizationId } = await requireOrgAdmin(ctx, args.organizationId)
     const now = Date.now()
     const user = await ctx.db.get(args.userId)
 
     if (!user) {
+      throw new Error('User not found.')
+    }
+
+    const targetMembership = await ctx.db
+      .query('memberships')
+      .withIndex('by_organizationId_and_userTokenIdentifier', (q) =>
+        q
+          .eq('organizationId', organizationId)
+          .eq('userTokenIdentifier', user.tokenIdentifier),
+      )
+      .first()
+
+    if (!targetMembership) {
       throw new Error('User not found.')
     }
 
@@ -350,11 +409,62 @@ export const unsuspendUser = mutation({
 })
 
 export const getCurrentOrganization = query({
+  args: {
+    organizationId: v.id('organizations'),
+  },
+  handler: async (ctx, args) => {
+    await requireOrganizationMembership(ctx, args.organizationId)
+
+    return await ctx.db.get(args.organizationId)
+  },
+})
+
+export const listMyOrganizations = query({
   args: {},
   handler: async (ctx) => {
-    await requireOrgAdmin(ctx)
+    const identity = await requireAllowedUser(ctx)
+    const memberships = await ctx.db
+      .query('memberships')
+      .withIndex('by_userTokenIdentifier', (q) =>
+        q.eq('userTokenIdentifier', identity.tokenIdentifier),
+      )
+      .collect()
 
-    return await getDefaultOrganization(ctx)
+    const byOrganizationId = new Map<
+      Id<'organizations'>,
+      {
+        roles: Array<'owner' | 'org_admin' | 'department_admin' | 'member' | 'viewer'>
+        departmentIds: Id<'departments'>[]
+      }
+    >()
+
+    for (const membership of memberships) {
+      const existing = byOrganizationId.get(membership.organizationId) ?? {
+        roles: [],
+        departmentIds: [],
+      }
+      existing.roles.push(membership.role)
+      if (membership.departmentId) {
+        existing.departmentIds.push(membership.departmentId)
+      }
+      byOrganizationId.set(membership.organizationId, existing)
+    }
+
+    const organizations = []
+    for (const [organizationId, membershipInfo] of byOrganizationId) {
+      const organization = await ctx.db.get(organizationId)
+      if (!organization) continue
+
+      organizations.push({
+        _id: organization._id,
+        name: organization.name,
+        slug: organization.slug,
+        roles: membershipInfo.roles,
+        departmentIds: membershipInfo.departmentIds,
+      })
+    }
+
+    return organizations.sort((a, b) => a.name.localeCompare(b.name))
   },
 })
 
@@ -365,21 +475,15 @@ export const internalRequireAllowedUser = internalQuery({
   },
 })
 
-export const internalGetDefaultOrgId = internalQuery({
-  args: {},
-  handler: async (ctx) => {
-    const org = await getDefaultOrganization(ctx)
-    return org?._id ?? null
-  },
-})
-
 export const internalRequireManualUploadPermission = internalQuery({
   args: {
+    organizationId: v.id('organizations'),
     visibility: v.union(v.literal('org'), v.literal('department'), v.literal('restricted')),
     departmentId: v.optional(v.id('departments')),
   },
   handler: async (ctx, args) => {
     return await requireManualUploadPermission(ctx, {
+      organizationId: args.organizationId,
       visibility: args.visibility,
       departmentId: args.departmentId,
     })
@@ -387,9 +491,20 @@ export const internalRequireManualUploadPermission = internalQuery({
 })
 
 export const internalRequireOrgAdmin = internalQuery({
-  args: {},
-  handler: async (ctx) => {
-    return await requireOrgAdmin(ctx)
+  args: {
+    organizationId: v.id('organizations'),
+  },
+  handler: async (ctx, args) => {
+    return await requireOrgAdmin(ctx, args.organizationId)
+  },
+})
+
+export const internalRequireOrganizationMembership = internalQuery({
+  args: {
+    organizationId: v.id('organizations'),
+  },
+  handler: async (ctx, args) => {
+    return await requireOrganizationMembership(ctx, args.organizationId)
   },
 })
 
@@ -452,10 +567,12 @@ export const internalSetOrgFilterMode = internalMutation({
 })
 
 export const getCurrentUserUploadInfo = query({
-  args: {},
-  handler: async (ctx) => {
+  args: {
+    organizationId: v.id('organizations'),
+  },
+  handler: async (ctx, args) => {
     const identity = await requireAllowedUser(ctx)
-    const organization = await getDefaultOrganization(ctx)
+    const organization = await ctx.db.get(args.organizationId)
 
     if (!organization) {
       return { canUpload: false, role: 'member' as const, departments: [] }
@@ -465,10 +582,14 @@ export const getCurrentUserUploadInfo = query({
       .query('memberships')
       .withIndex('by_organizationId_and_userTokenIdentifier', (q) =>
         q
-          .eq('organizationId', organization._id)
+          .eq('organizationId', args.organizationId)
           .eq('userTokenIdentifier', identity.tokenIdentifier),
       )
       .collect()
+
+    if (!isAdminIdentity(identity) && orgMemberships.length === 0) {
+      throw new Error('Organization not found.')
+    }
 
     const orgLevelMembership = orgMemberships.find(
       (m) => m.departmentId === undefined,
@@ -501,3 +622,93 @@ export const getCurrentUserUploadInfo = query({
     }
   },
 })
+
+export const ensureCohortDemoOrganization = mutation({
+  args: {},
+  handler: async (ctx) => {
+    const identity = await requireAllowedUser(ctx)
+    if (!isAdminIdentity(identity)) {
+      throw new Error('Admin access required')
+    }
+
+    await getOrCreateDefaultOrganization(ctx)
+
+    const now = Date.now()
+    const slug = 'cohort-demo-organization'
+    let organization = await ctx.db
+      .query('organizations')
+      .withIndex('by_slug', (q) => q.eq('slug', slug))
+      .unique()
+
+    if (!organization) {
+      const organizationId = await ctx.db.insert('organizations', {
+        name: 'Cohort Demo Organization',
+        slug,
+        createdAt: now,
+        updatedAt: now,
+      })
+      organization = await ctx.db.get(organizationId)
+    }
+
+    if (!organization) {
+      throw new Error('Could not create cohort demo organization.')
+    }
+
+    const orgMembership = await ctx.db
+      .query('memberships')
+      .withIndex('by_organizationId_and_userTokenIdentifier', (q) =>
+        q
+          .eq('organizationId', organization._id)
+          .eq('userTokenIdentifier', identity.tokenIdentifier),
+      )
+      .filter((q) => q.eq(q.field('departmentId'), undefined))
+      .unique()
+
+    if (!orgMembership) {
+      await ctx.db.insert('memberships', {
+        organizationId: organization._id,
+        userTokenIdentifier: identity.tokenIdentifier,
+        role: 'org_admin',
+        createdAt: now,
+        updatedAt: now,
+      })
+    }
+
+    const departmentNames = ['Demo Operations', 'Demo Finance', 'Demo HR']
+    const departments = []
+    for (const name of departmentNames) {
+      const deptSlug = slugify(name)
+      let department = await ctx.db
+        .query('departments')
+        .withIndex('by_organizationId_and_slug', (q) =>
+          q.eq('organizationId', organization._id).eq('slug', deptSlug),
+        )
+        .unique()
+
+      if (!department) {
+        const departmentId = await ctx.db.insert('departments', {
+          organizationId: organization._id,
+          name,
+          slug: deptSlug,
+          createdAt: now,
+          updatedAt: now,
+        })
+        department = await ctx.db.get(departmentId)
+      }
+
+      if (department) {
+        departments.push(department)
+      }
+    }
+
+    return { organization, departments }
+  },
+})
+
+function slugify(value: string) {
+  return value
+    .trim()
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, '-')
+    .replace(/^-+|-+$/g, '')
+}

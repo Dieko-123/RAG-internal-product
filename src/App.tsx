@@ -45,6 +45,7 @@ type ManualListItem = {
 type ChatSessionId = Id<'chatSessions'>
 type ManualId = Id<'manuals'>
 type DepartmentId = Id<'departments'>
+type OrganizationId = Id<'organizations'>
 
 type ChatSession = {
   _id: ChatSessionId
@@ -58,6 +59,14 @@ type Department = {
   _id: DepartmentId
   name: string
   slug: string
+}
+
+type Organization = {
+  _id: OrganizationId
+  name: string
+  slug: string
+  roles: Array<'owner' | 'org_admin' | 'department_admin' | 'member' | 'viewer'>
+  departmentIds: DepartmentId[]
 }
 
 type AppUser = {
@@ -206,6 +215,10 @@ function SignedInShell() {
   const [sidebarCollapsed, setSidebarCollapsed] = useState(false)
   const [selectedChatId, setSelectedChatId] = useState<ChatSessionId | null>(null)
   const [selectedManualIds, setSelectedManualIds] = useState<ManualId[]>([])
+  const [selectedOrganizationId, setSelectedOrganizationId] =
+    useState<OrganizationId | null>(() => {
+      return window.localStorage.getItem('manualAssistant.activeOrgId') as OrganizationId | null
+    })
   const [accessState, setAccessState] = useState<
     'idle' | 'checking' | 'ready' | 'denied'
   >('idle')
@@ -216,8 +229,7 @@ function SignedInShell() {
   const { isLoaded: isClerkUserLoaded, user: clerkUser } = useUser()
   const currentUser = useQuery(api.users.getCurrentUser, queryArgs)
   const isAdmin = useQuery(api.users.isCurrentUserAdmin, queryArgs)
-  const uploadInfo = useQuery(api.users.getCurrentUserUploadInfo, protectedQueryArgs)
-  const chatSessions = useQuery(api.chats.listChatSessions, protectedQueryArgs)
+  const organizations = useQuery(api.users.listMyOrganizations, protectedQueryArgs)
   const ensureCurrentUserAccess = useMutation(api.users.ensureCurrentUserAccess)
   const setChatPinned = useMutation(api.chats.setChatPinned)
   const deleteChatMutation = useMutation(api.chats.deleteChat)
@@ -229,7 +241,25 @@ function SignedInShell() {
     return currentUser.name ?? currentUser.email ?? 'User'
   }, [clerkUser, currentUser])
 
-  const canAccessAdmin = isAdmin || (uploadInfo?.canUpload ?? false)
+  const activeOrganizationId = useMemo(() => {
+    if (!organizations || organizations.length === 0) return selectedOrganizationId
+    const selectedIsValid = organizations.some(
+      (organization: Organization) => organization._id === selectedOrganizationId,
+    )
+    return selectedIsValid ? selectedOrganizationId : organizations[0]._id
+  }, [organizations, selectedOrganizationId])
+  const activeOrganizationArgs =
+    isAuthenticated && accessState === 'ready' && activeOrganizationId
+      ? { organizationId: activeOrganizationId }
+      : 'skip'
+  const uploadInfo = useQuery(api.users.getCurrentUserUploadInfo, activeOrganizationArgs)
+  const chatSessions = useQuery(api.chats.listChatSessions, activeOrganizationArgs)
+  const activeOrganization = useMemo(() => {
+    return (organizations ?? []).find(
+      (organization: Organization) => organization._id === activeOrganizationId,
+    ) ?? null
+  }, [organizations, activeOrganizationId])
+  const canAccessAdmin = Boolean(activeOrganizationId) && (isAdmin || (uploadInfo?.canUpload ?? false))
   const activeView = !canAccessAdmin && view === 'admin' ? 'chat' : view
 
   const clerkEmail = clerkUser?.primaryEmailAddress?.emailAddress
@@ -271,6 +301,15 @@ function SignedInShell() {
     clerkUser?.fullName,
   ])
 
+  function switchOrganization(organizationId: OrganizationId) {
+    if (organizationId === activeOrganizationId) return
+    setSelectedOrganizationId(organizationId)
+    window.localStorage.setItem('manualAssistant.activeOrgId', organizationId)
+    setSelectedChatId(null)
+    setSelectedManualIds([])
+    setView('chat')
+  }
+
   function startNewChat() {
     setView('chat')
     setSelectedChatId(null)
@@ -287,14 +326,17 @@ function SignedInShell() {
   }
 
   function togglePinned(session: ChatSession) {
+    if (!activeOrganizationId) return
     void setChatPinned({
+      organizationId: activeOrganizationId,
       chatSessionId: session._id,
       pinned: !session.pinned,
     })
   }
 
   function deleteChat(session: ChatSession) {
-    void deleteChatMutation({ chatSessionId: session._id })
+    if (!activeOrganizationId) return
+    void deleteChatMutation({ organizationId: activeOrganizationId, chatSessionId: session._id })
     if (selectedChatId === session._id) {
       setSelectedChatId(null)
     }
@@ -337,6 +379,27 @@ function SignedInShell() {
           </button>
         </div>
       </section>
+    )
+  }
+
+  if (organizations !== undefined && organizations.length === 0) {
+    return (
+      <section className="entry-layout">
+        <div className="entry-card">
+          <BrandMark />
+          <h1>No organization access</h1>
+          <p>Your account is active, but it is not assigned to an organization.</p>
+        </div>
+      </section>
+    )
+  }
+
+  if (organizations === undefined || !activeOrganizationId || !activeOrganization) {
+    return (
+      <div className="loading-screen">
+        <BrandMark />
+        <span>Loading organization...</span>
+      </div>
     )
   }
 
@@ -402,6 +465,12 @@ function SignedInShell() {
             </button>
           ) : null}
         </nav>
+        <OrganizationSwitcher
+          activeOrganizationId={activeOrganizationId}
+          organizations={organizations}
+          collapsed={sidebarCollapsed}
+          onSwitch={switchOrganization}
+        />
         {activeView === 'chat' ? (
           <section className="chat-history" aria-label="Previous chats">
             <button
@@ -454,6 +523,7 @@ function SignedInShell() {
       <div className="main-panel" data-view={activeView}>
         {activeView === 'chat' ? (
           <ChatWorkspace
+            organizationId={activeOrganizationId}
             selectedChatId={selectedChatId}
             onSelectChat={setSelectedChatId}
             canQuery={accessState === 'ready'}
@@ -466,16 +536,67 @@ function SignedInShell() {
           />
         ) : activeView === 'documents' ? (
           <DocumentsWorkspace
+            organizationId={activeOrganizationId}
             canQuery={accessState === 'ready'}
             selectedManualIds={selectedManualIds}
             onSelectedManualIdsChange={setSelectedManualIds}
             onStartChat={openNewChatWithSelectedManuals}
           />
         ) : (
-          <AdminWorkspace canQuery={accessState === 'ready'} isOrgAdmin={!!isAdmin || uploadInfo?.role === 'org_admin'} uploadInfo={uploadInfo} />
+          <AdminWorkspace
+            organizationId={activeOrganizationId}
+            activeOrganization={activeOrganization}
+            canQuery={accessState === 'ready'}
+            isOrgAdmin={!!isAdmin || uploadInfo?.role === 'org_admin'}
+            isSystemAdmin={!!isAdmin}
+            uploadInfo={uploadInfo}
+          />
         )}
       </div>
     </section>
+  )
+}
+
+function OrganizationSwitcher({
+  activeOrganizationId,
+  organizations,
+  collapsed,
+  onSwitch,
+}: {
+  activeOrganizationId: OrganizationId
+  organizations: Organization[]
+  collapsed: boolean
+  onSwitch: (organizationId: OrganizationId) => void
+}) {
+  const activeOrganization = organizations.find((org) => org._id === activeOrganizationId)
+
+  if (collapsed) {
+    return (
+      <div className="org-switcher org-switcher-collapsed" title={activeOrganization?.name}>
+        {activeOrganization?.name.slice(0, 1).toUpperCase() ?? 'O'}
+      </div>
+    )
+  }
+
+  return (
+    <div className="org-switcher">
+      <span className="org-switcher-label">Organization</span>
+      {organizations.length > 1 ? (
+        <select
+          value={activeOrganizationId}
+          onChange={(event) => onSwitch(event.target.value as OrganizationId)}
+          aria-label="Active organization"
+        >
+          {organizations.map((organization) => (
+            <option value={organization._id} key={organization._id}>
+              {organization.name}
+            </option>
+          ))}
+        </select>
+      ) : (
+        <div className="org-switcher-static">{activeOrganization?.name ?? 'Organization'}</div>
+      )}
+    </div>
   )
 }
 
@@ -491,24 +612,27 @@ const MAX_SELECTED_MANUALS = 30
 // select a folder instead of 30 individual PDFs.
 
 function ChatWorkspace({
+  organizationId,
   selectedChatId,
   onSelectChat,
   canQuery,
   selectedManualIds,
   lockedManualTitles,
 }: {
+  organizationId: OrganizationId
   selectedChatId: ChatSessionId | null
   onSelectChat: (chatSessionId: ChatSessionId | null) => void
   canQuery: boolean
   selectedManualIds: ManualId[]
   lockedManualTitles: string[] | null
 }) {
-  const queryArgs = canQuery ? {} : 'skip'
+  const queryArgs = canQuery ? { organizationId } : 'skip'
   const selectableManuals = useQuery(api.manuals.listSelectableManuals, queryArgs)
   const messages = useQuery(
     api.chats.listChatMessages,
     canQuery
       ? {
+          organizationId,
           chatSessionId: selectedChatId ?? undefined,
         }
       : 'skip',
@@ -543,6 +667,7 @@ function ChatWorkspace({
 
     try {
       const result = await askMultiManualQuestion({
+        organizationId,
         question: trimmedQuestion,
         chatSessionId: selectedChatId ?? undefined,
         selectedManualIds: selectedChatId ? undefined : selectedManualIds,
@@ -778,11 +903,13 @@ function CitationList({
 }
 
 function DocumentsWorkspace({
+  organizationId,
   canQuery,
   selectedManualIds,
   onSelectedManualIdsChange,
   onStartChat,
 }: {
+  organizationId: OrganizationId
   canQuery: boolean
   selectedManualIds: ManualId[]
   onSelectedManualIdsChange: (manualIds: ManualId[]) => void
@@ -790,11 +917,11 @@ function DocumentsWorkspace({
 }) {
   const manuals = useQuery(
     api.manuals.listManuals,
-    canQuery ? {} : 'skip',
+    canQuery ? { organizationId } : 'skip',
   )
   const selectableManuals = useQuery(
     api.manuals.listSelectableManuals,
-    canQuery ? {} : 'skip',
+    canQuery ? { organizationId } : 'skip',
   )
   const [manualSearch, setManualSearch] = useState('')
   const manualsList: SelectableManual[] = useMemo(
@@ -979,12 +1106,18 @@ type UploadInfo = {
 }
 
 function AdminWorkspace({
+  organizationId,
+  activeOrganization,
   canQuery,
   isOrgAdmin,
+  isSystemAdmin,
   uploadInfo,
 }: {
+  organizationId: OrganizationId
+  activeOrganization: Organization
   canQuery: boolean
   isOrgAdmin: boolean
+  isSystemAdmin: boolean
   uploadInfo: UploadInfo | undefined
 }) {
   const [isIngesting, setIsIngesting] = useState(false)
@@ -1006,25 +1139,29 @@ function AdminWorkspace({
   const [message, setMessage] = useState<string | null>(null)
   const [error, setError] = useState<string | null>(null)
   const [showAllManuals, setShowAllManuals] = useState(false)
+  const ensureCohortDemoOrganization = useMutation(api.users.ensureCohortDemoOrganization)
   const manuals = useQuery(
     api.manuals.listManuals,
-    canQuery ? {} : 'skip',
+    canQuery ? { organizationId } : 'skip',
   )
   const departments = useQuery(
     api.departments.listDepartments,
-    canQuery && isOrgAdmin ? {} : 'skip',
+    canQuery && isOrgAdmin ? { organizationId } : 'skip',
   )
   const users = useQuery(
     api.users.listExistingUsersForAdmin,
-    canQuery && isOrgAdmin ? {} : 'skip',
+    canQuery && isOrgAdmin ? { organizationId } : 'skip',
   )
   const departmentMembers = useQuery(
     api.departments.listDepartmentMembers,
     canQuery && isOrgAdmin && selectedDepartmentId
-      ? { departmentId: selectedDepartmentId }
+      ? { organizationId, departmentId: selectedDepartmentId }
       : 'skip',
   )
-  const debugState = useQuery(api.manuals.debugManualState, canQuery && isOrgAdmin ? {} : 'skip')
+  const debugState = useQuery(
+    api.manuals.debugManualState,
+    canQuery && isOrgAdmin ? { organizationId } : 'skip',
+  )
   const [showDebug, setShowDebug] = useState(false)
   const ingestDummyManual = useAction(api.gemini.ingestDummyManual)
   const ingestUploadedManual = useAction(api.gemini.ingestUploadedManual)
@@ -1040,7 +1177,10 @@ function AdminWorkspace({
   )
   const suspendUser = useMutation(api.users.suspendUser)
   const unsuspendUser = useMutation(api.users.unsuspendUser)
-  const invites = useQuery(api.invitesQueries.listInvites, canQuery ? {} : 'skip')
+  const invites = useQuery(
+    api.invitesQueries.listInvites,
+    canQuery ? { organizationId } : 'skip',
+  )
   const inviteUser = useAction(api.invites.inviteUser)
   const revokeInviteAction = useAction(api.invites.revokeInvite)
   const [inviteEmail, setInviteEmail] = useState('')
@@ -1072,6 +1212,7 @@ function AdminWorkspace({
 
     try {
       const result = await inviteUser({
+        organizationId,
         email,
         role: inviteRole,
         departmentId: effectiveInviteDepartmentId || undefined,
@@ -1096,7 +1237,7 @@ function AdminWorkspace({
     setError(null)
 
     try {
-      const result = await ingestDummyManual({})
+      const result = await ingestDummyManual({ organizationId })
       setMessage(`Dummy manual is ${result.status}. Store: ${result.geminiFileSearchStoreName}`)
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Ingestion failed')
@@ -1127,6 +1268,7 @@ function AdminWorkspace({
 
     try {
       const uploadUrl = await generateManualUploadUrl({
+        organizationId,
         visibility: effectiveUploadVisibility,
         departmentId: effectiveUploadVisibility === 'department' && effectiveUploadDepartmentId
           ? effectiveUploadDepartmentId
@@ -1147,6 +1289,7 @@ function AdminWorkspace({
       }
 
       const result = await ingestUploadedManual({
+        organizationId,
         storageId,
         title,
         sourceFileName: selectedFile.name,
@@ -1178,7 +1321,7 @@ function AdminWorkspace({
     setError(null)
 
     try {
-      await createDepartment({ name })
+      await createDepartment({ organizationId, name })
       setDepartmentName('')
       setMessage(`Created department: ${name}`)
     } catch (err) {
@@ -1203,6 +1346,7 @@ function AdminWorkspace({
 
     try {
       await assignUserToDepartment({
+        organizationId,
         departmentId: selectedDepartmentId,
         userTokenIdentifier: selectedUserTokenIdentifier,
         role: departmentRole,
@@ -1219,21 +1363,45 @@ function AdminWorkspace({
     <>
       <div className="page-header">
         <h1>Admin</h1>
-        <p>Upload and index manuals for Gemini File Search</p>
+        <p>Managing {activeOrganization.name}</p>
       </div>
+
+      {isSystemAdmin ? (
+        <div className="admin-demo-banner">
+          <div>
+            <strong>Cohort demo workspace</strong>
+            <span>Create the isolated demo organization and sample departments.</span>
+          </div>
+          <button
+            type="button"
+            className="btn"
+            onClick={() => {
+              void ensureCohortDemoOrganization()
+                .then((result) => {
+                  setMessage(`Ready: ${result.organization.name}`)
+                })
+                .catch((err) =>
+                  setError(err instanceof Error ? err.message : 'Demo setup failed'),
+                )
+            }}
+          >
+            Create demo org
+          </button>
+        </div>
+      ) : null}
 
       {showAllManuals ? (
         <AllManualsModal
           manuals={manuals}
           onClose={() => setShowAllManuals(false)}
           onRetry={(ingestionJobId) => {
-            void retryIndexing({ ingestionJobId }).then(() => setMessage('Retry indexing queued')).catch((err) => setError(err instanceof Error ? err.message : 'Retry failed'))
+            void retryIndexing({ organizationId, ingestionJobId }).then(() => setMessage('Retry indexing queued')).catch((err) => setError(err instanceof Error ? err.message : 'Retry failed'))
           }}
           onArchive={(manualId) => {
-            void archiveManual({ manualId }).then(() => setMessage('Manual archived')).catch((err) => setError(err instanceof Error ? err.message : 'Archive failed'))
+            void archiveManual({ organizationId, manualId }).then(() => setMessage('Manual archived')).catch((err) => setError(err instanceof Error ? err.message : 'Archive failed'))
           }}
           onRestore={(manualId) => {
-            void restoreManual({ manualId }).then(() => setMessage('Manual restored')).catch((err) => setError(err instanceof Error ? err.message : 'Restore failed'))
+            void restoreManual({ organizationId, manualId }).then(() => setMessage('Manual restored')).catch((err) => setError(err instanceof Error ? err.message : 'Restore failed'))
           }}
         />
       ) : null}
@@ -1459,7 +1627,7 @@ function AdminWorkspace({
                       className="btn-small btn-danger"
                       onClick={() => {
                         if (confirm(`Revoke invite for ${invite.email}?`)) {
-                          void revokeInviteAction({ inviteId: invite._id })
+                          void revokeInviteAction({ organizationId, inviteId: invite._id })
                             .then(() => setMessage('Invite revoked'))
                             .catch((err) =>
                               setError(err instanceof Error ? err.message : 'Revoke failed'),
@@ -1482,21 +1650,21 @@ function AdminWorkspace({
           manuals={manuals}
           onViewAll={() => setShowAllManuals(true)}
           onRetry={(ingestionJobId) => {
-            void retryIndexing({ ingestionJobId }).then(() => {
+            void retryIndexing({ organizationId, ingestionJobId }).then(() => {
               setMessage('Retry indexing queued')
             }).catch((err) => {
               setError(err instanceof Error ? err.message : 'Retry failed')
             })
           }}
           onArchive={(manualId) => {
-            void archiveManual({ manualId }).then(() => {
+            void archiveManual({ organizationId, manualId }).then(() => {
               setMessage('Manual archived')
             }).catch((err) => {
               setError(err instanceof Error ? err.message : 'Archive failed')
             })
           }}
           onRestore={(manualId) => {
-            void restoreManual({ manualId }).then(() => {
+            void restoreManual({ organizationId, manualId }).then(() => {
               setMessage('Manual restored')
             }).catch((err) => {
               setError(err instanceof Error ? err.message : 'Restore failed')
@@ -1531,7 +1699,7 @@ function AdminWorkspace({
             <DepartmentList
               departments={departments}
               onArchive={(departmentId) => {
-                void archiveDepartment({ departmentId }).then(() => {
+                void archiveDepartment({ organizationId, departmentId }).then(() => {
                   setMessage('Department archived')
                 }).catch((err) => {
                   setError(err instanceof Error ? err.message : 'Archive failed')
@@ -1550,14 +1718,14 @@ function AdminWorkspace({
             <UserList
               users={users}
               onSuspend={(userId) => {
-                void suspendUser({ userId }).then(() => {
+                void suspendUser({ organizationId, userId }).then(() => {
                   setMessage('User suspended')
                 }).catch((err) => {
                   setError(err instanceof Error ? err.message : 'Suspend failed')
                 })
               }}
               onUnsuspend={(userId) => {
-                void unsuspendUser({ userId }).then(() => {
+                void unsuspendUser({ organizationId, userId }).then(() => {
                   setMessage('User unsuspended')
                 }).catch((err) => {
                   setError(err instanceof Error ? err.message : 'Unsuspend failed')
@@ -1641,6 +1809,7 @@ function AdminWorkspace({
                 if (!selectedDepartmentId) return
 
                 void removeDepartmentMembership({
+                  organizationId,
                   departmentId: selectedDepartmentId,
                   userTokenIdentifier,
                 }).then(() => {

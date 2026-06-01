@@ -3,10 +3,9 @@ import { internalMutation, internalQuery, mutation, query } from './_generated/s
 import type { Doc, Id } from './_generated/dataModel'
 import type { QueryCtx } from './_generated/server'
 import {
-  getDefaultOrganization,
-  getOrCreateDefaultOrganization,
   isAdminIdentity,
   requireManualUploadPermission,
+  requireOrganizationMembership,
   requireAllowedUser,
   requireOrgAdmin,
 } from './permissions'
@@ -33,24 +32,31 @@ const citationValidator = v.object({
 
 // TODO: optimize ingestion job lookup when manual count grows (N+1 query)
 export const listManuals = query({
-  args: {},
-  handler: async (ctx) => {
-    const identity = await requireAllowedUser(ctx)
-    const organization = await getDefaultOrganization(ctx)
-    const manuals = organization
-      ? await collectOrganizationManuals(ctx, organization._id)
-      : await ctx.db.query('manuals').withIndex('by_slug').collect()
+  args: {
+    organizationId: v.id('organizations'),
+  },
+  handler: async (ctx, args) => {
+    const { identity, organizationId } = await requireOrganizationMembership(
+      ctx,
+      args.organizationId,
+    )
+    const organization = await ctx.db.get(organizationId)
+    const manuals = await collectOrganizationManuals(
+      ctx,
+      organizationId,
+      shouldIncludeLegacyDefaultOrgManuals(organization),
+    )
 
     const orgManuals = manuals.sort((a, b) => b.updatedAt - a.updatedAt)
 
-    const isOrgLevel = isAdminIdentity(identity) || (organization
-      ? await isOrgAdminOrOwner(ctx, organization._id, identity.tokenIdentifier)
-      : false)
+    const isOrgLevel =
+      isAdminIdentity(identity) ||
+      (await isOrgAdminOrOwner(ctx, organizationId, identity.tokenIdentifier))
 
     let visibleManuals = orgManuals
     if (!isOrgLevel) {
       const userDeptIds = organization
-        ? await getUserAccessibleDepartmentIds(ctx, organization._id, identity.tokenIdentifier)
+        ? await getUserAccessibleDepartmentIds(ctx, organizationId, identity.tokenIdentifier)
         : new Set<string>()
 
       visibleManuals = orgManuals.filter((manual) => {
@@ -74,7 +80,7 @@ export const listManuals = query({
 
       results.push({
         ...manual,
-        organizationId: manual.organizationId ?? organization?._id,
+        organizationId: manual.organizationId ?? organizationId,
         visibility: manual.visibility ?? 'org',
         latestIngestionJob: latestIngestionJob
           ? {
@@ -97,23 +103,32 @@ export const listManuals = query({
 })
 
 export const listSelectableManuals = query({
-  args: {},
-  handler: async (ctx) => {
-    const identity = await requireAllowedUser(ctx)
-    const organization = await getDefaultOrganization(ctx)
+  args: {
+    organizationId: v.id('organizations'),
+  },
+  handler: async (ctx, args) => {
+    const { identity, organizationId } = await requireOrganizationMembership(
+      ctx,
+      args.organizationId,
+    )
+    const organization = await ctx.db.get(organizationId)
     if (!organization) return []
 
-    const activeManuals = (await collectOrganizationManuals(ctx, organization._id))
+    const activeManuals = (await collectOrganizationManuals(
+      ctx,
+      organizationId,
+      shouldIncludeLegacyDefaultOrgManuals(organization),
+    ))
       .filter((manual) => manual.status === 'active')
       .sort((a, b) => b.updatedAt - a.updatedAt)
 
     const isOrgLevel =
       isAdminIdentity(identity) ||
-      (await isOrgAdminOrOwner(ctx, organization._id, identity.tokenIdentifier))
+      (await isOrgAdminOrOwner(ctx, organizationId, identity.tokenIdentifier))
 
     const userDeptIds = isOrgLevel
       ? null
-      : await getUserAccessibleDepartmentIds(ctx, organization._id, identity.tokenIdentifier)
+      : await getUserAccessibleDepartmentIds(ctx, organizationId, identity.tokenIdentifier)
 
     const results: Array<{
       _id: Id<'manuals'>
@@ -156,22 +171,30 @@ export const listSelectableManuals = query({
 })
 
 export const getActiveManual = query({
-  args: {},
-  handler: async (ctx) => {
-    await requireAllowedUser(ctx)
+  args: {
+    organizationId: v.id('organizations'),
+  },
+  handler: async (ctx, args) => {
+    await requireOrganizationMembership(ctx, args.organizationId)
 
-    return await getActiveManualRecord(ctx)
+    return await getActiveManualRecord(ctx, args.organizationId)
   },
 })
 
 // Admin-only debug query — safe fields only, no secrets or raw content.
 export const debugManualState = query({
-  args: {},
-  handler: async (ctx) => {
-    const { organizationId } = await requireOrgAdmin(ctx)
+  args: {
+    organizationId: v.id('organizations'),
+  },
+  handler: async (ctx, args) => {
+    const { organizationId } = await requireOrgAdmin(ctx, args.organizationId)
     const organization = await ctx.db.get(organizationId)
 
-    const manuals = (await collectOrganizationManuals(ctx, organizationId))
+    const manuals = (await collectOrganizationManuals(
+      ctx,
+      organizationId,
+      shouldIncludeLegacyDefaultOrgManuals(organization),
+    ))
       .sort((a, b) => b.updatedAt - a.updatedAt)
 
     const results = []
@@ -232,41 +255,52 @@ export const debugManualState = query({
 
 export const getManualForQuestion = query({
   args: {
+    organizationId: v.id('organizations'),
     manualId: v.optional(v.id('manuals')),
   },
   handler: async (ctx, args) => {
-    await requireAllowedUser(ctx)
+    await requireOrganizationMembership(ctx, args.organizationId)
 
-    return await getManualForQuestionRecord(ctx, args.manualId)
+    return await getManualForQuestionRecord(ctx, args.organizationId, args.manualId)
   },
 })
 
 export const internalGetActiveManual = internalQuery({
-  args: {},
-  handler: async (ctx) => {
-    return await getActiveManualRecord(ctx)
+  args: {
+    organizationId: v.id('organizations'),
+  },
+  handler: async (ctx, args) => {
+    return await getActiveManualRecord(ctx, args.organizationId)
   },
 })
 
 export const internalGetManualForQuestion = internalQuery({
   args: {
+    organizationId: v.id('organizations'),
     manualId: v.optional(v.id('manuals')),
   },
   handler: async (ctx, args) => {
-    return await getManualForQuestionRecord(ctx, args.manualId)
+    return await getManualForQuestionRecord(ctx, args.organizationId, args.manualId)
   },
 })
 
 export const archiveManual = mutation({
   args: {
+    organizationId: v.id('organizations'),
     manualId: v.id('manuals'),
   },
   handler: async (ctx, args) => {
-    const { identity } = await requireOrgAdmin(ctx)
+    const { identity, organizationId } = await requireOrgAdmin(ctx, args.organizationId)
     const now = Date.now()
     const manual = await ctx.db.get(args.manualId)
+    const organization = await ctx.db.get(organizationId)
+    const allowLegacyManual = shouldIncludeLegacyDefaultOrgManuals(organization)
 
-    if (!manual) {
+    if (
+      !manual ||
+      (manual.organizationId !== organizationId &&
+        !(manual.organizationId === undefined && allowLegacyManual))
+    ) {
       throw new Error('Manual not found.')
     }
 
@@ -296,14 +330,21 @@ export const archiveManual = mutation({
 
 export const restoreManual = mutation({
   args: {
+    organizationId: v.id('organizations'),
     manualId: v.id('manuals'),
   },
   handler: async (ctx, args) => {
-    const { identity } = await requireOrgAdmin(ctx)
+    const { identity, organizationId } = await requireOrgAdmin(ctx, args.organizationId)
     const now = Date.now()
     const manual = await ctx.db.get(args.manualId)
+    const organization = await ctx.db.get(organizationId)
+    const allowLegacyManual = shouldIncludeLegacyDefaultOrgManuals(organization)
 
-    if (!manual) {
+    if (
+      !manual ||
+      (manual.organizationId !== organizationId &&
+        !(manual.organizationId === undefined && allowLegacyManual))
+    ) {
       throw new Error('Manual not found.')
     }
 
@@ -333,11 +374,13 @@ export const restoreManual = mutation({
 
 export const generateManualUploadUrl = mutation({
   args: {
+    organizationId: v.id('organizations'),
     visibility: v.union(v.literal('org'), v.literal('department')),
     departmentId: v.optional(v.id('departments')),
   },
   handler: async (ctx, args) => {
     await requireManualUploadPermission(ctx, {
+      organizationId: args.organizationId,
       visibility: args.visibility,
       departmentId: args.departmentId,
     })
@@ -348,6 +391,7 @@ export const generateManualUploadUrl = mutation({
 
 export const internalCreateManualIfMissing = internalMutation({
   args: {
+    organizationId: v.id('organizations'),
     title: v.string(),
     slug: v.string(),
     actorTokenIdentifier: v.string(),
@@ -355,17 +399,18 @@ export const internalCreateManualIfMissing = internalMutation({
     departmentId: v.optional(v.id('departments')),
   },
   handler: async (ctx, args) => {
-    const organizationId = await getOrCreateDefaultOrganization(ctx)
     const now = Date.now()
     const visibility = args.visibility ?? 'org'
     const existing = await ctx.db
       .query('manuals')
-      .withIndex('by_slug', (q) => q.eq('slug', args.slug))
+      .withIndex('by_organizationId_and_slug', (q) =>
+        q.eq('organizationId', args.organizationId).eq('slug', args.slug),
+      )
       .unique()
 
     if (existing) {
       await ctx.db.patch(existing._id, {
-        organizationId: existing.organizationId ?? organizationId,
+        organizationId: args.organizationId,
         visibility: existing.visibility ?? visibility,
         departmentId: existing.departmentId ?? args.departmentId,
         status: existing.status === 'active' ? 'active' : 'indexing',
@@ -375,7 +420,7 @@ export const internalCreateManualIfMissing = internalMutation({
     }
 
     return await ctx.db.insert('manuals', {
-      organizationId,
+      organizationId: args.organizationId,
       departmentId: args.departmentId,
       visibility,
       title: args.title,
@@ -408,8 +453,10 @@ export const internalCreateManualVersion = internalMutation({
   handler: async (ctx, args) => {
     const now = Date.now()
     const manual = await ctx.db.get(args.manualId)
-    const organizationId =
-      manual?.organizationId ?? (await getOrCreateDefaultOrganization(ctx))
+    if (!manual?.organizationId) {
+      throw new Error('Manual organization is not configured.')
+    }
+    const organizationId = manual.organizationId
     const visibility = args.visibility ?? manual?.visibility ?? 'org'
     const departmentId = args.departmentId ?? manual?.departmentId
     const providerMode = args.providerMode ?? 'legacy_per_manual_store'
@@ -598,6 +645,7 @@ export const internalWriteAuditEvent = internalMutation({
 
 export const internalGetManualVersionsForScope = internalQuery({
   args: {
+    organizationId: v.id('organizations'),
     manualVersionIds: v.array(v.id('manualVersions')),
     userTokenIdentifier: v.string(),
   },
@@ -607,18 +655,19 @@ export const internalGetManualVersionsForScope = internalQuery({
       throw new Error('Token mismatch')
     }
 
-    const organization = await getDefaultOrganization(ctx)
+    const organization = await ctx.db.get(args.organizationId)
     if (!organization) {
       throw new Error('Organization not configured.')
     }
+    const allowLegacyManuals = shouldIncludeLegacyDefaultOrgManuals(organization)
 
     const isOrgLevel =
       isAdminIdentity(identity) ||
-      (await isOrgAdminOrOwner(ctx, organization._id, identity.tokenIdentifier))
+      (await isOrgAdminOrOwner(ctx, args.organizationId, identity.tokenIdentifier))
 
     const userDeptIds = isOrgLevel
       ? null
-      : await getUserAccessibleDepartmentIds(ctx, organization._id, identity.tokenIdentifier)
+      : await getUserAccessibleDepartmentIds(ctx, args.organizationId, identity.tokenIdentifier)
 
     type EffectiveVersion = {
       manualId: Id<'manuals'>
@@ -651,6 +700,30 @@ export const internalGetManualVersionsForScope = internalQuery({
       const manual = await ctx.db.get(version.manualId)
       if (!manual) {
         excluded.push({ manualId: version.manualId, manualVersionId: versionId, reason: 'missing' })
+        continue
+      }
+
+      const manualOrganizationId = manual.organizationId ?? version.organizationId
+      if (
+        manualOrganizationId !== args.organizationId &&
+        !(manualOrganizationId === undefined && allowLegacyManuals)
+      ) {
+        excluded.push({
+          manualId: manual._id,
+          manualVersionId: versionId,
+          title: manual.title,
+          reason: 'unauthorized',
+        })
+        continue
+      }
+
+      if (version.organizationId && version.organizationId !== args.organizationId) {
+        excluded.push({
+          manualId: manual._id,
+          manualVersionId: versionId,
+          title: manual.title,
+          reason: 'unauthorized',
+        })
         continue
       }
 
@@ -753,11 +826,12 @@ export const internalGetManualVersionsForScope = internalQuery({
 
 export const internalGetRetrievalDebugState = internalQuery({
   args: {
+    organizationId: v.id('organizations'),
     manualId: v.optional(v.id('manuals')),
     manualVersionId: v.optional(v.id('manualVersions')),
   },
   handler: async (ctx, args) => {
-    const organization = await getDefaultOrganization(ctx)
+    const organization = await ctx.db.get(args.organizationId)
     if (!organization) {
       throw new Error('Organization not configured.')
     }
@@ -770,6 +844,10 @@ export const internalGetRetrievalDebugState = internalQuery({
     }
 
     if (!manual) {
+      throw new Error('Manual not found.')
+    }
+
+    if ((manual.organizationId ?? version?.organizationId) !== args.organizationId) {
       throw new Error('Manual not found.')
     }
 
@@ -841,40 +919,66 @@ export const internalGetRetrievalDebugState = internalQuery({
   },
 })
 
-async function getActiveManualRecord(ctx: QueryCtx) {
-  const organization = await getDefaultOrganization(ctx)
-  const manual = await ctx.db
+async function getActiveManualRecord(
+  ctx: QueryCtx,
+  organizationId: Id<'organizations'>,
+) {
+  const identity = await requireAllowedUser(ctx)
+  const manuals = await ctx.db
     .query('manuals')
-    .withIndex('by_status', (q) => q.eq('status', 'active'))
+    .withIndex('by_organizationId_and_status', (q) =>
+      q.eq('organizationId', organizationId).eq('status', 'active'),
+    )
     .order('desc')
-    .first()
+    .take(50)
+  const organization = await ctx.db.get(organizationId)
+  const allowLegacyManual = shouldIncludeLegacyDefaultOrgManuals(organization)
 
-  if (!manual?.currentVersionId) {
-    return null
+  for (const manual of manuals) {
+    if (!manual.currentVersionId) {
+      continue
+    }
+
+    if (
+      manual.organizationId !== organizationId &&
+      !(manual.organizationId === undefined && allowLegacyManual)
+    ) {
+      continue
+    }
+
+    if (!(await canAccessManual(ctx, organizationId, identity, manual))) {
+      continue
+    }
+
+    const version = await ctx.db.get(manual.currentVersionId)
+
+    if (!version || version.status !== 'active') {
+      continue
+    }
+
+    if (version.organizationId && version.organizationId !== organizationId) {
+      continue
+    }
+
+    return {
+      manual: {
+        ...manual,
+        organizationId: manual.organizationId ?? organizationId,
+        visibility: manual.visibility ?? 'org',
+      },
+      version: {
+        ...version,
+        organizationId: version.organizationId ?? manual.organizationId ?? organizationId,
+        departmentId: version.departmentId ?? manual.departmentId,
+        visibility: version.visibility ?? manual.visibility ?? 'org',
+        providerMode: version.providerMode ?? 'legacy_per_manual_store',
+        geminiDocumentName:
+          version.geminiDocumentName ?? version.geminiFileSearchDocumentName,
+      },
+    }
   }
 
-  const version = await ctx.db.get(manual.currentVersionId)
-
-  if (!version || version.status !== 'active') {
-    return null
-  }
-
-  return {
-    manual: {
-      ...manual,
-      organizationId: manual.organizationId ?? organization?._id,
-      visibility: manual.visibility ?? 'org',
-    },
-    version: {
-      ...version,
-      organizationId: version.organizationId ?? manual.organizationId ?? organization?._id,
-      departmentId: version.departmentId ?? manual.departmentId,
-      visibility: version.visibility ?? manual.visibility ?? 'org',
-      providerMode: version.providerMode ?? 'legacy_per_manual_store',
-      geminiDocumentName:
-        version.geminiDocumentName ?? version.geminiFileSearchDocumentName,
-    },
-  }
+  return null
 }
 
 async function isOrgAdminOrOwner(
@@ -901,17 +1005,26 @@ async function isOrgAdminOrOwner(
 async function collectOrganizationManuals(
   ctx: QueryCtx,
   organizationId: Id<'organizations'>,
+  includeLegacyManuals = false,
 ): Promise<Array<Doc<'manuals'>>> {
   const currentManuals = await ctx.db
     .query('manuals')
     .withIndex('by_organizationId', (q) => q.eq('organizationId', organizationId))
     .collect()
-  const legacyManuals = await ctx.db
-    .query('manuals')
-    .withIndex('by_organizationId', (q) => q.eq('organizationId', undefined))
-    .collect()
+  const legacyManuals = includeLegacyManuals
+    ? await ctx.db
+        .query('manuals')
+        .withIndex('by_organizationId', (q) => q.eq('organizationId', undefined))
+        .collect()
+    : []
 
   return [...currentManuals, ...legacyManuals]
+}
+
+function shouldIncludeLegacyDefaultOrgManuals(
+  organization: { slug: string } | null,
+): boolean {
+  return organization?.slug === 'execujet-aviation-nigeria'
 }
 
 async function getUserAccessibleDepartmentIds(
@@ -939,21 +1052,45 @@ async function getUserAccessibleDepartmentIds(
 
 async function getManualForQuestionRecord(
   ctx: QueryCtx,
+  organizationId: Id<'organizations'>,
   manualId: Id<'manuals'> | undefined,
 ) {
+  const identity = await requireAllowedUser(ctx)
+
   if (!manualId) {
-    return await getActiveManualRecord(ctx)
+    return await getActiveManualRecord(ctx, organizationId)
   }
 
   const manual = await ctx.db.get(manualId)
 
-  if (!manual || manual.status !== 'active' || !manual.currentVersionId) {
+  if (
+    !manual ||
+    manual.status !== 'active' ||
+    !manual.currentVersionId
+  ) {
+    return null
+  }
+
+  const organization = await ctx.db.get(organizationId)
+  const allowLegacyManual = shouldIncludeLegacyDefaultOrgManuals(organization)
+  if (
+    manual.organizationId !== organizationId &&
+    !(manual.organizationId === undefined && allowLegacyManual)
+  ) {
+    return null
+  }
+
+  if (!(await canAccessManual(ctx, organizationId, identity, manual))) {
     return null
   }
 
   const version = await ctx.db.get(manual.currentVersionId)
 
-  if (!version || version.status !== 'active') {
+  if (
+    !version ||
+    version.status !== 'active' ||
+    (version.organizationId && version.organizationId !== organizationId)
+  ) {
     return null
   }
 
@@ -970,4 +1107,48 @@ async function getManualForQuestionRecord(
         version.geminiDocumentName ?? version.geminiFileSearchDocumentName,
     },
   }
+}
+
+async function canAccessManual(
+  ctx: QueryCtx,
+  organizationId: Id<'organizations'>,
+  identity: Awaited<ReturnType<typeof requireAllowedUser>>,
+  manual: Doc<'manuals'>,
+): Promise<boolean> {
+  const visibility = manual.visibility ?? 'org'
+
+  if (visibility === 'restricted') {
+    return false
+  }
+
+  if (isAdminIdentity(identity)) {
+    return true
+  }
+
+  const memberships = await ctx.db
+    .query('memberships')
+    .withIndex('by_organizationId_and_userTokenIdentifier', (q) =>
+      q
+        .eq('organizationId', organizationId)
+        .eq('userTokenIdentifier', identity.tokenIdentifier),
+    )
+    .collect()
+
+  const isOrgLevel = memberships.some(
+    (membership) =>
+      membership.departmentId === undefined &&
+      (membership.role === 'owner' || membership.role === 'org_admin'),
+  )
+
+  if (isOrgLevel || visibility === 'org') {
+    return memberships.length > 0
+  }
+
+  if (visibility === 'department' && manual.departmentId) {
+    return memberships.some(
+      (membership) => membership.departmentId === manual.departmentId,
+    )
+  }
+
+  return false
 }
