@@ -227,52 +227,189 @@
 }
 
 .org-switcher {
-  margin-top: 14px;
+  display: grid;
+  gap: 10px;
+  margin-top: 16px;
   padding: 12px;
-  border: 1px solid var(--border);
-  border-radius: 10px;
-  background: var(--surface);
+  border: 1px solid color-mix(in oklch, var(--border) 82%, var(--text));
+  border-radius: 14px;
+  background:
+    linear-gradient(180deg, color-mix(in oklch, var(--surface) 94%, white), var(--surface));
+  box-shadow: inset 0 1px 0 color-mix(in oklch, white 66%, transparent);
 }
 
-.org-switcher-label {
-  display: block;
-  margin-bottom: 6px;
+.org-switcher.demo {
+  border-color: color-mix(in oklch, oklch(74% 0.19 338) 42%, var(--border));
+  background:
+    radial-gradient(circle at top right, oklch(92% 0.07 338 / 0.72), transparent 42%),
+    linear-gradient(180deg, color-mix(in oklch, var(--surface) 94%, white), var(--surface));
+}
+
+.org-switcher-kicker {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
   color: var(--muted);
   font-size: 11px;
   font-weight: 700;
-  letter-spacing: 0.04em;
+  letter-spacing: 0.055em;
   text-transform: uppercase;
 }
 
-.org-switcher select {
-  width: 100%;
+.org-switcher-kicker span:last-child {
+  color: color-mix(in oklch, var(--accent) 72%, var(--muted));
+  font-weight: 760;
+  text-align: right;
+}
+
+.org-switcher-current {
+  display: flex;
+  align-items: center;
+  gap: 10px;
   min-width: 0;
-  border: 1px solid var(--border);
-  border-radius: 8px;
-  padding: 8px 10px;
-  background: var(--surface);
-  color: var(--text);
+}
+
+.org-switcher-mark,
+.org-switcher-option-mark,
+.org-switcher-collapsed {
+  display: inline-grid;
+  place-items: center;
+  flex: 0 0 auto;
+  border: 1px solid color-mix(in oklch, var(--border) 74%, var(--accent));
+  background: var(--accent-subtle);
+  color: var(--accent);
+  font-weight: 760;
+  letter-spacing: -0.02em;
+}
+
+.org-switcher-mark {
+  width: 38px;
+  height: 38px;
+  border-radius: 12px;
   font-size: 13px;
 }
 
-.org-switcher-static {
+.org-switcher-current div {
+  display: grid;
+  gap: 2px;
+  min-width: 0;
+}
+
+.org-switcher-current strong {
   color: var(--text);
   font-size: 13px;
-  font-weight: 600;
+  line-height: 1.25;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.org-switcher-current span {
+  color: var(--muted);
+  font-size: 11px;
+}
+
+.org-switcher-options {
+  display: grid;
+  gap: 6px;
+  max-height: 188px;
+  overflow-y: auto;
+  padding-top: 2px;
+}
+
+.org-switcher-option {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  width: 100%;
+  min-width: 0;
+  min-height: 38px;
+  border: 1px solid transparent;
+  border-radius: 11px;
+  padding: 6px 8px;
+  background: transparent;
+  color: var(--text);
+  cursor: pointer;
+  font: inherit;
+  text-align: left;
+  transition:
+    background 0.14s ease,
+    border-color 0.14s ease,
+    color 0.14s ease,
+    transform 0.14s ease;
+}
+
+.org-switcher-option:hover {
+  transform: translateY(-1px);
+  border-color: var(--border);
+  background: var(--hover);
+}
+
+.org-switcher-option:focus-visible,
+.org-switcher-collapsed:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+}
+
+.org-switcher-option.active {
+  border-color: color-mix(in oklch, var(--accent) 34%, var(--border));
+  background: var(--accent-subtle);
+  color: var(--accent);
+}
+
+.org-switcher-option.demo.active {
+  border-color: color-mix(in oklch, oklch(74% 0.19 338) 48%, var(--border));
+  background: oklch(97% 0.025 338);
+  color: oklch(43% 0.14 338);
+}
+
+.org-switcher-option span:last-child {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 12px;
+  font-weight: 620;
+}
+
+.org-switcher-option-mark {
+  width: 24px;
+  height: 24px;
+  border-radius: 8px;
+  font-size: 10px;
+}
+
+.org-switcher-static {
+  color: var(--muted);
+  font-size: 12px;
+  font-weight: 560;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
 }
 
 .org-switcher-collapsed {
-  display: grid;
-  place-items: center;
   width: 44px;
   height: 44px;
   padding: 0;
-  color: var(--accent);
   font-size: 14px;
-  font-weight: 700;
+  border-radius: 14px;
+  cursor: pointer;
+  transition:
+    background 0.14s ease,
+    border-color 0.14s ease,
+    transform 0.14s ease;
+}
+
+.org-switcher-collapsed:hover {
+  transform: translateY(-1px);
+  border-color: color-mix(in oklch, var(--accent) 42%, var(--border));
+}
+
+.org-switcher-collapsed.demo {
+  border-color: color-mix(in oklch, oklch(74% 0.19 338) 45%, var(--border));
+  background: oklch(97% 0.03 338);
+  color: oklch(43% 0.14 338);
 }
 
 .chat-history {

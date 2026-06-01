@@ -574,35 +574,101 @@ function OrganizationSwitcher({
   onSwitch: (organizationId: OrganizationId) => void
 }) {
   const activeOrganization = organizations.find((org) => org._id === activeOrganizationId)
+  const activeIndex = organizations.findIndex((org) => org._id === activeOrganizationId)
+  const nextOrganization = activeIndex >= 0
+    ? organizations[(activeIndex + 1) % organizations.length]
+    : organizations[0]
+  const activeIsDemoOrganization = activeOrganization?.slug === demoOrganizationSlug
+  const organizationScopeLabel = activeIsDemoOrganization
+    ? 'Demo data only'
+    : 'Organization data only'
 
   if (collapsed) {
+    const canCycleOrganizations = organizations.length > 1 && nextOrganization
+
     return (
-      <div className="org-switcher org-switcher-collapsed" title={activeOrganization?.name}>
-        {activeOrganization?.name.slice(0, 1).toUpperCase() ?? 'O'}
-      </div>
+      <button
+        type="button"
+        className={activeIsDemoOrganization ? 'org-switcher-collapsed demo' : 'org-switcher-collapsed'}
+        title={canCycleOrganizations
+          ? `${activeOrganization?.name ?? 'Organization'} - switch to ${nextOrganization.name}`
+          : activeOrganization?.name}
+        aria-label={canCycleOrganizations
+          ? `Active organization: ${activeOrganization?.name ?? 'Organization'}. Switch to ${nextOrganization.name}.`
+          : `Active organization: ${activeOrganization?.name ?? 'Organization'}.`}
+        onClick={() => {
+          if (!canCycleOrganizations) return
+          onSwitch(nextOrganization._id)
+        }}
+      >
+        {getOrganizationInitials(activeOrganization?.name)}
+      </button>
     )
   }
 
   return (
-    <div className="org-switcher">
-      <span className="org-switcher-label">Organization</span>
+    <section
+      className={activeIsDemoOrganization ? 'org-switcher demo' : 'org-switcher'}
+      aria-label="Organization context"
+    >
+      <div className="org-switcher-kicker">
+        <span>Active workspace</span>
+        <span>{organizationScopeLabel}</span>
+      </div>
+      <div className="org-switcher-current">
+        <span className="org-switcher-mark" aria-hidden="true">
+          {getOrganizationInitials(activeOrganization?.name)}
+        </span>
+        <div>
+          <strong>{activeOrganization?.name ?? 'Organization'}</strong>
+          <span>{activeIsDemoOrganization ? 'Cohort demo isolation is on' : 'Private tenant boundary'}</span>
+        </div>
+      </div>
       {organizations.length > 1 ? (
-        <select
-          value={activeOrganizationId}
-          onChange={(event) => onSwitch(event.target.value as OrganizationId)}
+        <div
+          className="org-switcher-options"
+          role="radiogroup"
           aria-label="Active organization"
         >
           {organizations.map((organization) => (
-            <option value={organization._id} key={organization._id}>
-              {organization.name}
-            </option>
+            <button
+              type="button"
+              role="radio"
+              aria-checked={organization._id === activeOrganizationId}
+              className={[
+                'org-switcher-option',
+                organization._id === activeOrganizationId ? 'active' : '',
+                organization.slug === demoOrganizationSlug ? 'demo' : '',
+              ].filter(Boolean).join(' ')}
+              key={organization._id}
+              onClick={() => onSwitch(organization._id)}
+            >
+              <span className="org-switcher-option-mark" aria-hidden="true">
+                {getOrganizationInitials(organization.name)}
+              </span>
+              <span>{organization.name}</span>
+            </button>
           ))}
-        </select>
+        </div>
       ) : (
-        <div className="org-switcher-static">{activeOrganization?.name ?? 'Organization'}</div>
+        <span className="org-switcher-static">Only workspace available</span>
       )}
-    </div>
+    </section>
   )
+}
+
+function getOrganizationInitials(name?: string): string {
+  if (!name) return 'O'
+
+  const words = name
+    .split(/\s+/)
+    .map((word) => word.replace(/[^A-Za-z0-9]/g, ''))
+    .filter(Boolean)
+
+  if (words.length === 0) return 'O'
+  if (words.length === 1) return words[0].slice(0, 2).toUpperCase()
+
+  return `${words[0][0]}${words[1][0]}`.toUpperCase()
 }
 
 type SelectableManual = {
